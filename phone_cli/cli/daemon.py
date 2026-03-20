@@ -276,8 +276,14 @@ class PhoneCLIDaemon:
             sock.settimeout(15.0)
             payload = json.dumps({"cmd": cmd, "args": args or {}})
             sock.sendall(payload.encode("utf-8"))
-            response = sock.recv(1048576).decode("utf-8")
-            return response
+            sock.shutdown(socket.SHUT_WR)
+            chunks: list[bytes] = []
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks).decode("utf-8")
         except socket.timeout:
             from phone_cli.cli.output import ErrorCode, error_response
             return error_response(

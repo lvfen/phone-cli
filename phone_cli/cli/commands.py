@@ -482,3 +482,111 @@ def _cmd_log(args: dict, daemon: Any) -> str:
     # Take last N lines
     entries = [l.rstrip("\n") for l in all_lines[-lines_count:]]
     return ok_response({"entries": entries})
+
+
+# ── New commands: reduce screenshot frequency ─────────────────────────
+
+@_register("app_state")
+def _cmd_app_state(args: dict, daemon: Any) -> str:
+    """Get app foreground state without taking a screenshot."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            f"app_state is only supported for ADB devices, current: {device_type}",
+        )
+    device_id = _get_device_id(args, daemon)
+    from phone_cli.adb.device import get_app_state
+    package = args.get("package")
+    result = get_app_state(package=package, device_id=device_id)
+    return ok_response(result)
+
+
+@_register("wait_for_app")
+def _cmd_wait_for_app(args: dict, daemon: Any) -> str:
+    """Wait for an app to reach a target state with polling."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            f"wait_for_app is only supported for ADB devices, current: {device_type}",
+        )
+    device_id = _get_device_id(args, daemon)
+    package = args.get("package")
+    if not package:
+        return error_response(ErrorCode.COMMAND_FAILED, "package is required")
+    timeout = args.get("timeout", 30)
+    target_state = args.get("state", "resumed")
+    from phone_cli.adb.device import wait_for_app
+    try:
+        result = wait_for_app(
+            package=package, timeout=timeout,
+            target_state=target_state, device_id=device_id,
+        )
+        return ok_response(result)
+    except TimeoutError as e:
+        return error_response(ErrorCode.APP_NOT_RUNNING, str(e))
+
+
+@_register("check_screen")
+def _cmd_check_screen(args: dict, daemon: Any) -> str:
+    """Check screen health (all-black/all-white detection)."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            f"check_screen is only supported for ADB devices, current: {device_type}",
+        )
+    device_id = _get_device_id(args, daemon)
+    threshold = args.get("threshold", 0.95)
+    from phone_cli.adb.device import check_screen_health
+    try:
+        result = check_screen_health(threshold=threshold, device_id=device_id)
+        return ok_response(result)
+    except Exception as e:
+        return error_response(ErrorCode.SCREEN_CHECK_FAILED, str(e))
+
+
+@_register("app_log")
+def _cmd_app_log(args: dict, daemon: Any) -> str:
+    """Get app logs via adb logcat."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            f"app_log is only supported for ADB devices, current: {device_type}",
+        )
+    device_id = _get_device_id(args, daemon)
+    from phone_cli.adb.device import get_app_log
+    package = args.get("package")
+    filter_type = args.get("filter", "all")
+    lines = args.get("lines", 20)
+    result = get_app_log(
+        package=package, filter_type=filter_type,
+        lines=lines, device_id=device_id,
+    )
+    return ok_response(result)
+
+
+@_register("install")
+def _cmd_install(args: dict, daemon: Any) -> str:
+    """Install APK and optionally launch it."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            f"install is only supported for ADB devices, current: {device_type}",
+        )
+    device_id = _get_device_id(args, daemon)
+    apk_path = args.get("apk_path")
+    if not apk_path:
+        return error_response(ErrorCode.COMMAND_FAILED, "apk_path is required")
+    launch = args.get("launch", False)
+    from phone_cli.adb.device import install_apk
+    try:
+        result = install_apk(apk_path=apk_path, launch=launch, device_id=device_id)
+        return ok_response(result)
+    except FileNotFoundError as e:
+        return error_response(ErrorCode.INSTALL_FAILED, str(e))
+    except RuntimeError as e:
+        return error_response(ErrorCode.INSTALL_FAILED, str(e))

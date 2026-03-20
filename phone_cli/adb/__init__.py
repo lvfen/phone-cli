@@ -9,13 +9,18 @@ from phone_cli.adb.connection import (
 )
 from phone_cli.adb.device import (
     back,
+    check_screen_health,
     double_tap,
+    get_app_log,
+    get_app_state,
     get_current_app,
     home,
+    install_apk,
     launch_app,
     long_press,
     swipe,
     tap,
+    wait_for_app,
 )
 from phone_cli.adb.input import (
     clear_text,
@@ -35,6 +40,11 @@ __all__ = [
     "restore_keyboard",
     # Device control
     "get_current_app",
+    "get_app_state",
+    "wait_for_app",
+    "check_screen_health",
+    "get_app_log",
+    "install_apk",
     "tap",
     "swipe",
     "back",

@@ -1,6 +1,7 @@
 """Click CLI entry point for phone-cli."""
 
 import json
+import os
 import sys
 
 import click
@@ -122,7 +123,7 @@ def long_press(x, y):
 def swipe(x1, y1, x2, y2):
     """Swipe from (x1,y1) to (x2,y2) (0-999 relative)."""
     daemon = PhoneCLIDaemon()
-    _print_json(daemon.send_command("swipe", {"x1": x1, "y1": y1, "x2": x2, "y2": y2}))
+    _print_json(daemon.send_command("swipe", {"start_x": x1, "start_y": y1, "end_x": x2, "end_y": y2}))
 
 
 @cli.command(name="type")
@@ -152,7 +153,7 @@ def home():
 def launch(app_name):
     """Launch an app by name."""
     daemon = PhoneCLIDaemon()
-    _print_json(daemon.send_command("launch", {"app": app_name}))
+    _print_json(daemon.send_command("launch", {"app_name": app_name}))
 
 
 @cli.command(name="get-current-app")
@@ -202,6 +203,73 @@ def log(tail, task_id):
     if task_id:
         args["task_id"] = task_id
     _print_json(daemon.send_command("log", args))
+
+
+# ── New commands: reduce screenshot frequency ─────────────────────────
+
+@cli.command(name="app-state")
+@click.option("--package", "-p", default=None, help="Target package name")
+def app_state(package):
+    """Get app foreground state (replaces screenshot-based verification)."""
+    daemon = PhoneCLIDaemon()
+    args = {}
+    if package:
+        args["package"] = package
+    _print_json(daemon.send_command("app_state", args))
+
+
+@cli.command(name="wait-for-app")
+@click.argument("package")
+@click.option("--timeout", "-t", default=30, type=int, help="Max wait seconds")
+@click.option("--state", "-s", default="resumed",
+              type=click.Choice(["resumed", "running"]),
+              help="Target state to wait for")
+def wait_for_app(package, timeout, state):
+    """Wait for an app to reach target state (replaces sleep + screenshot polling)."""
+    daemon = PhoneCLIDaemon()
+    _print_json(daemon.send_command("wait_for_app", {
+        "package": package,
+        "timeout": timeout,
+        "state": state,
+    }))
+
+
+@cli.command(name="check-screen")
+@click.option("--threshold", default=0.95, type=float,
+              help="Ratio threshold for all-black/all-white detection")
+def check_screen(threshold):
+    """Check screen health (all-black/all-white detection)."""
+    daemon = PhoneCLIDaemon()
+    _print_json(daemon.send_command("check_screen", {
+        "threshold": threshold,
+    }))
+
+
+@cli.command(name="app-log")
+@click.option("--package", "-p", default=None, help="Target package name")
+@click.option("--filter", "-f", "filter_type", default="all",
+              type=click.Choice(["crash", "lifecycle", "all"]),
+              help="Log filter type")
+@click.option("--lines", "-n", default=20, type=int, help="Number of log lines")
+def app_log(package, filter_type, lines):
+    """Get app logs (replaces manual adb logcat)."""
+    daemon = PhoneCLIDaemon()
+    args = {"filter": filter_type, "lines": lines}
+    if package:
+        args["package"] = package
+    _print_json(daemon.send_command("app_log", args))
+
+
+@cli.command()
+@click.argument("apk_path", type=click.Path(exists=True))
+@click.option("--launch", is_flag=True, help="Launch app after installation")
+def install(apk_path, launch):
+    """Install APK and optionally launch it."""
+    daemon = PhoneCLIDaemon()
+    _print_json(daemon.send_command("install", {
+        "apk_path": os.path.abspath(apk_path),
+        "launch": launch,
+    }))
 
 
 if __name__ == "__main__":
