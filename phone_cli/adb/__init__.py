@@ -14,6 +14,7 @@ from phone_cli.adb.device import (
     get_app_log,
     get_app_state,
     get_current_app,
+    get_screen_size,
     home,
     install_apk,
     launch_app,
@@ -40,6 +41,7 @@ __all__ = [
     "restore_keyboard",
     # Device control
     "get_current_app",
+    "get_screen_size",
     "get_app_state",
     "wait_for_app",
     "check_screen_health",

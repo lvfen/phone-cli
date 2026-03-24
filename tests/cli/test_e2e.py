@@ -16,10 +16,14 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run_cli(*args) -> dict:
+def _run_cli(*args, instance: str | None = None) -> dict:
     """Run phone-cli command and parse JSON output."""
+    cmd = [PHONE_CLI]
+    if instance:
+        cmd.extend(["--instance", instance])
+    cmd.extend(args)
     result = subprocess.run(
-        [PHONE_CLI] + list(args),
+        cmd,
         capture_output=True, text=True, timeout=30,
     )
     try:
@@ -31,43 +35,48 @@ def _run_cli(*args) -> dict:
 @pytest.fixture(scope="module", autouse=True)
 def start_daemon():
     """Start daemon before tests, stop after."""
-    _run_cli("start", "--device-type", "adb")
+    _run_cli("start", "--device-type", "adb", instance="adb")
     time.sleep(2)
+    devices_result = _run_cli("devices", instance="adb")
+    devices = devices_result.get("data", {}).get("devices", [])
+    if devices_result.get("status") != "ok" or not devices:
+        _run_cli("stop", instance="adb")
+        pytest.skip("E2E tests require a connected ADB device or emulator")
     yield
-    _run_cli("stop")
+    _run_cli("stop", instance="adb")
 
 
 class TestPhoneCLIE2E:
 
     def test_status_running(self):
-        result = _run_cli("status")
+        result = _run_cli("status", instance="adb")
         assert result["status"] == "ok"
         assert result["data"]["status"] == "running"
 
     def test_devices(self):
-        result = _run_cli("devices")
+        result = _run_cli("devices", instance="adb")
         assert result["status"] == "ok"
         assert len(result["data"]["devices"]) > 0
 
     def test_screenshot(self):
-        result = _run_cli("screenshot", "--resize", "720")
+        result = _run_cli("screenshot", "--resize", "720", instance="adb")
         assert result["status"] == "ok"
         assert os.path.exists(result["data"]["path"])
         assert result["data"]["width"] == 720
 
     def test_get_current_app(self):
-        result = _run_cli("get-current-app")
+        result = _run_cli("get-current-app", instance="adb")
         assert result["status"] == "ok"
         assert "app_name" in result["data"]
 
     def test_home(self):
-        result = _run_cli("home")
+        result = _run_cli("home", instance="adb")
         assert result["status"] == "ok"
 
     def test_tap(self):
-        result = _run_cli("tap", "500", "500")
+        result = _run_cli("tap", "500", "500", instance="adb")
         assert result["status"] == "ok"
 
     def test_back(self):
-        result = _run_cli("back")
+        result = _run_cli("back", instance="adb")
         assert result["status"] == "ok"

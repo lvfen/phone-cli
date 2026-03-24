@@ -1,27 +1,43 @@
 # phone-cli
 
-CLI tool for AI-powered phone automation via ADB (Android), HDC (HarmonyOS) and iOS (tidevice + WDA).
+CLI tool for AI-powered phone automation via ADB (Android), HDC (HarmonyOS), and iOS multi-runtime backends:
+
+- `device`: iPhone / iPad real device via `tidevice + WDA`
+- `simulator`: iOS Simulator via `simctl + host automation`
+- `app-on-mac`: iOS App on Mac via macOS host automation
 
 ## Installation
 
 ```bash
-# Basic installation (Android & HarmonyOS)
+# Basic installation (Android + HarmonyOS + dev tools)
 pip install -e ".[dev]"
 
-# With iOS support
+# iOS support (real device + Simulator + App on Mac)
 pip install -e ".[ios]"
 
-# Full installation (iOS + dev tools)
+# Full installation
 pip install -e ".[ios,dev]"
 ```
 
 ### iOS Prerequisites
 
-iOS automation requires a Mac with the following:
+iOS automation requires macOS.
 
-1. **Xcode** and command-line tools installed
-2. **WebDriverAgent** built and deployed to the target device — see [appium/WebDriverAgent](https://github.com/appium/WebDriverAgent)
-3. Python dependencies (`tidevice` and `facebook-wda`) are installed automatically via `pip install phone-cli[ios]`
+General requirements:
+
+1. Xcode and command-line tools installed
+2. `pip install -e ".[ios]"` to install `tidevice`, `facebook-wda`, and PyObjC host automation dependencies
+
+Runtime-specific requirements:
+
+1. `device`
+   - A connected iPhone / iPad trusted by the Mac
+   - WebDriverAgent built and deployed to the device
+2. `simulator`
+   - At least one Booted iOS Simulator
+3. `app-on-mac`
+   - Apple Silicon Mac
+   - Accessibility and Screen Recording permissions granted to the shell / Python host
 
 ## Usage
 
@@ -29,69 +45,142 @@ iOS automation requires a Mac with the following:
 # Check version
 phone-cli version
 
-# ── Android (default) ────────────────────────────
-phone-cli start                          # Start daemon (ADB)
-phone-cli devices                        # List connected Android devices
+# Android (default)
+phone-cli start
+phone-cli devices
 
-# ── HarmonyOS ────────────────────────────────────
-phone-cli start --device-type hdc        # Start daemon (HDC)
+# HarmonyOS
+phone-cli start --device-type hdc
 
-# ── iOS ──────────────────────────────────────────
-phone-cli start --device-type ios        # Start daemon (iOS via tidevice + WDA)
-phone-cli devices                        # List connected iOS devices
+# iOS: inspect available runtimes first
+phone-cli detect-runtimes --device-type ios
 
-# ── Common commands (all platforms) ──────────────
-phone-cli screenshot                     # Capture screenshot
-phone-cli tap 500 500                    # Tap at coordinates (0-999 relative)
-phone-cli swipe 500 800 500 200          # Swipe gesture
-phone-cli home                           # Press home button
-phone-cli back                           # Back navigation (iOS: left-edge swipe)
-phone-cli launch 微信                     # Launch app by name
-phone-cli launch Settings                # Launch app (English name)
-phone-cli get-current-app                # Get foreground app
-phone-cli ui-tree                        # Dump UI accessibility tree
-phone-cli type "Hello"                   # Type text into focused field
-phone-cli stop                           # Stop daemon
+# iOS: auto-select when only one candidate exists
+phone-cli start --device-type ios
+
+# iOS: explicit runtime selection
+phone-cli start --device-type ios --runtime device --device-id <udid>
+phone-cli start --device-type ios --runtime simulator --device-id <sim_udid>
+phone-cli start --device-type ios --runtime app-on-mac
+
+# Launch apps
+phone-cli launch 微信
+phone-cli launch --bundle-id com.apple.Preferences
+phone-cli launch --app-path "/path/to/Demo.app"
+
+# Common commands
+phone-cli device-info
+phone-cli screenshot
+phone-cli tap 500 500
+phone-cli swipe 500 800 500 200
+phone-cli type "Hello"
+phone-cli get-current-app
+phone-cli ui-tree
+phone-cli app-state --bundle-id com.apple.Preferences
+phone-cli wait-for-app --bundle-id com.apple.Preferences --timeout 10
+phone-cli stop
+```
+
+### Parallel Android + iOS Instances
+
+`phone-cli` now supports independent daemon instances per platform family, so Android / HarmonyOS / iOS can run side by side.
+
+If only one instance is running, bare commands like `phone-cli status` still work.
+If multiple instances are running at the same time, use `--instance adb|hdc|ios` to target the right one.
+
+```bash
+# Start Android and iOS independently
+phone-cli --instance adb start --device-type adb
+phone-cli --instance ios start --device-type ios --runtime simulator --device-id <sim_udid>
+
+# Target each instance explicitly
+phone-cli --instance adb status
+phone-cli --instance ios status
+phone-cli --instance adb screenshot
+phone-cli --instance ios screenshot
+
+# Stop one instance or all of them
+phone-cli --instance ios stop
+phone-cli stop --all
+```
+
+### iOS Runtime Selection Rules
+
+`phone-cli start --device-type ios` behaves as follows:
+
+1. `0` candidates: returns `NO_AVAILABLE_IOS_RUNTIME`
+2. `1` candidate: auto-selects it and starts directly
+3. `2+` candidates: returns `RUNTIME_SELECTION_REQUIRED`
+
+If you already know which runtime you want, pass `--runtime` explicitly to skip auto-selection.
+
+### Example iOS Workflows
+
+#### Real device
+
+```bash
+phone-cli detect-runtimes --device-type ios
+phone-cli start --device-type ios --runtime device --device-id <udid>
+phone-cli launch --bundle-id com.tencent.xin
+phone-cli wait-for-app --bundle-id com.tencent.xin --timeout 10
+```
+
+#### Simulator
+
+```bash
+phone-cli detect-runtimes --device-type ios
+phone-cli start --device-type ios --runtime simulator --device-id <sim_udid>
+phone-cli launch --bundle-id com.apple.Preferences
+phone-cli screenshot
+```
+
+#### App on Mac
+
+```bash
+phone-cli detect-runtimes --device-type ios
+phone-cli start --device-type ios --runtime app-on-mac
+phone-cli launch --bundle-id com.example.demo
+phone-cli ui-tree
 ```
 
 ## Supported Platforms
 
-| Platform   | Connection | Device Control       | Notes                                    |
-|------------|------------|----------------------|------------------------------------------|
-| Android    | ADB        | `input` shell cmds   | Default; supports USB, WiFi, TCP/IP      |
-| HarmonyOS  | HDC        | `uitest` shell cmds  | Huawei devices                           |
-| iOS        | tidevice   | WDA HTTP API         | Requires WebDriverAgent on device        |
+| Platform | Transport / Driver | Interaction Model | Notes |
+|---|---|---|---|
+| Android | `adb` | shell input + screenshot | Default; supports USB, WiFi, TCP/IP |
+| HarmonyOS | `hdc` | `uitest` + screenshot | Huawei devices |
+| iOS device | `tidevice + WDA` | WDA HTTP API | Full legacy real-device path |
+| iOS simulator | `simctl + host events` | screenshot + mapped host interaction | `ui-tree` unavailable in MVP |
+| iOS app-on-mac | `open + Quartz + AX` | window screenshot + host interaction | AX quality depends on app implementation |
 
 ## Architecture
 
-```
+```text
 phone_cli/
-├── cli/                  # CLI entry point & daemon
-│   ├── main.py           # Click CLI definition
-│   ├── commands.py       # Command dispatch & handlers
-│   ├── daemon.py         # Background daemon lifecycle
-│   └── output.py         # JSON response formatting
+├── cli/                  # CLI entry point, commands, daemon, JSON output
 ├── adb/                  # Android implementation
-│   ├── connection.py     # ADB device discovery & connection
-│   ├── device.py         # Tap, swipe, home, back, launch …
-│   ├── input.py          # ADB Keyboard text input
-│   └── screenshot.py     # screencap + pull
 ├── hdc/                  # HarmonyOS implementation
-│   ├── connection.py
-│   ├── device.py
-│   ├── input.py
-│   └── screenshot.py
-├── ios/                  # iOS implementation
-│   ├── connection.py     # tidevice wdaproxy + wda.Client cache
-│   ├── device.py         # WDA tap, swipe, home, launch …
-│   ├── input.py          # WDA send_keys / clear_text
-│   └── screenshot.py     # WDA screenshot → PIL → base64
+├── ios/
+│   ├── __init__.py       # iOS facade
+│   ├── runtime/
+│   │   ├── base.py       # Shared backend protocol and capabilities
+│   │   ├── discovery.py  # device / simulator / app_on_mac candidate discovery
+│   │   ├── router.py     # Runtime -> backend dispatch
+│   │   ├── device_backend.py
+│   │   ├── simulator_backend.py
+│   │   └── app_on_mac_backend.py
+│   └── host/
+│       ├── permissions.py
+│       ├── windows.py
+│       ├── events.py
+│       ├── screenshots.py
+│       └── ax_tree.py
 └── config/
-    ├── apps.py           # Android package name mapping
-    ├── apps_harmonyos.py # HarmonyOS bundle name mapping
-    ├── apps_ios.py       # iOS bundle ID mapping
-    ├── i18n.py           # Internationalization
-    └── timing.py         # Timing / delay configuration
+    ├── apps.py
+    ├── apps_harmonyos.py
+    ├── apps_ios.py
+    ├── i18n.py
+    └── timing.py
 ```
 
 ## Development
@@ -100,6 +189,6 @@ phone_cli/
 # Run unit tests (no device needed)
 pytest tests/cli/ -v --ignore=tests/cli/test_e2e.py
 
-# Run E2E tests (requires connected device)
+# Run E2E tests (requires connected target)
 pytest tests/cli/test_e2e.py -v
 ```

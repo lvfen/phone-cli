@@ -6,6 +6,8 @@ import tempfile
 from unittest.mock import MagicMock, patch, PropertyMock
 
 from phone_cli.cli.commands import dispatch_command, CoordConverter
+from phone_cli.ios.runtime.base import UnsupportedOperationError
+from phone_cli.ios.runtime.discovery import RuntimeCandidate, RuntimeDiscoveryResult
 
 
 # ── CoordConverter tests ──────────────────────────────────────────────
@@ -65,6 +67,29 @@ def test_dispatch_devices_adb():
     assert parsed["data"]["devices"][0]["device_id"] == "abc123"
 
 
+def test_dispatch_devices_ios_includes_runtime_fields():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "ios_runtime": "simulator",
+    }
+    with patch("phone_cli.ios.list_devices") as mock_list:
+        mock_target = MagicMock()
+        mock_target.device_id = "sim-1"
+        mock_target.target_id = "sim-1"
+        mock_target.runtime = "simulator"
+        mock_target.name = "iPhone 16 Pro (Booted)"
+        mock_target.model = "iPhone 16 Pro (Booted)"
+        mock_target.status = "available"
+        mock_list.return_value = [mock_target]
+        result = dispatch_command("devices", {}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["ios_runtime"] == "simulator"
+    assert parsed["data"]["devices"][0]["runtime"] == "simulator"
+    assert parsed["data"]["devices"][0]["target_id"] == "sim-1"
+
+
 def test_dispatch_set_device():
     mock_daemon = MagicMock()
     mock_daemon._read_state.return_value = {"device_type": "adb"}
@@ -87,6 +112,34 @@ def test_dispatch_device_info():
     assert parsed["data"]["device_id"] == "dev1"
 
 
+def test_dispatch_device_info_ios_returns_runtime_fields():
+    mock_daemon = MagicMock()
+    state = {
+        "device_type": "ios",
+        "device_id": "sim-1",
+        "target_id": "sim-1",
+        "ios_runtime": "simulator",
+        "screen_size": [1179, 2556],
+        "device_status": "connected",
+        "capabilities": {"launch": False},
+    }
+    mock_daemon._read_state.return_value = state
+
+    def _fake_sync(*args, **kwargs):
+        state["capabilities"] = {"launch": True}
+        state["window_id"] = 202
+
+    with patch("phone_cli.cli.commands._sync_ios_state", side_effect=_fake_sync) as mock_sync:
+        result = dispatch_command("device_info", {}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["ios_runtime"] == "simulator"
+    assert parsed["data"]["target_id"] == "sim-1"
+    assert parsed["data"]["capabilities"]["launch"] is True
+    assert parsed["data"]["window_id"] == 202
+    mock_sync.assert_called_once()
+
+
 def test_dispatch_tap():
     mock_daemon = MagicMock()
     mock_daemon._read_state.return_value = {
@@ -99,6 +152,24 @@ def test_dispatch_tap():
     parsed = json.loads(result)
     assert parsed["status"] == "ok"
     mock_tap.assert_called_once()
+
+
+def test_dispatch_tap_adb_refreshes_real_screen_size():
+    mock_daemon = MagicMock()
+    state = {
+        "device_type": "adb",
+        "device_id": "dev1",
+    }
+    mock_daemon._read_state.return_value = state
+    with patch("phone_cli.adb.get_screen_size", return_value=(1440, 3120)) as mock_size, \
+         patch("phone_cli.adb.tap") as mock_tap:
+        result = dispatch_command("tap", {"x": 500, "y": 500}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    mock_size.assert_called_once_with(device_id="dev1")
+    mock_tap.assert_called_once_with(720, 1561, device_id="dev1")
+    mock_daemon._write_state.assert_called_once()
+    assert state["screen_size"] == [1440, 3120]
 
 
 def test_dispatch_swipe():
@@ -177,6 +248,31 @@ def test_dispatch_launch():
     assert parsed["status"] == "ok"
 
 
+def test_dispatch_launch_ios_with_bundle_id():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "dev1",
+        "target_id": "dev1",
+        "ios_runtime": "device",
+    }
+    with patch("phone_cli.ios.launch_app", return_value=True) as mock_launch:
+        result = dispatch_command(
+            "launch",
+            {"bundle_id": "com.example.demo"},
+            mock_daemon,
+        )
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    mock_launch.assert_called_once_with(
+        app_name=None,
+        bundle_id="com.example.demo",
+        app_path=None,
+        device_id="dev1",
+        state=mock_daemon._read_state.return_value,
+    )
+
+
 def test_dispatch_launch_not_found():
     mock_daemon = MagicMock()
     mock_daemon._read_state.return_value = {"device_type": "adb", "device_id": "dev1"}
@@ -195,6 +291,40 @@ def test_dispatch_get_current_app():
     parsed = json.loads(result)
     assert parsed["status"] == "ok"
     assert parsed["data"]["app_name"] == "WeChat"
+
+
+def test_dispatch_ui_tree_ios_routes_via_facade():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "dev1",
+        "target_id": "dev1",
+        "ios_runtime": "device",
+    }
+    with patch("phone_cli.ios.ui_tree", return_value={"elements": [{"type": "Button"}]}) as mock_tree:
+        result = dispatch_command("ui_tree", {}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["elements"][0]["type"] == "Button"
+    mock_tree.assert_called_once_with(device_id="dev1", state=mock_daemon._read_state.return_value)
+
+
+def test_dispatch_ui_tree_simulator_returns_unavailable():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "sim-1",
+        "target_id": "sim-1",
+        "ios_runtime": "simulator",
+    }
+    with patch(
+        "phone_cli.ios.ui_tree",
+        side_effect=UnsupportedOperationError("simulator", "ui_tree"),
+    ):
+        result = dispatch_command("ui_tree", {}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "error"
+    assert parsed["error_code"] == "UI_TREE_UNAVAILABLE"
 
 
 def test_dispatch_screenshot():
@@ -287,6 +417,20 @@ def test_dispatch_log():
     assert len(parsed["data"]["entries"]) == 2
 
 
+def test_dispatch_detect_runtimes():
+    mock_daemon = MagicMock()
+    discovery = RuntimeDiscoveryResult(
+        candidates=[RuntimeCandidate(runtime="device", target_id="dev1", label="iPhone")],
+        reasons=[],
+    )
+    with patch("phone_cli.ios.runtime.discovery.detect_ios_runtimes", return_value=discovery):
+        result = dispatch_command("detect_runtimes", {"device_type": "ios"}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["auto_selectable"] is True
+    assert parsed["data"]["selection"]["mode"] == "auto_selected"
+
+
 def test_dispatch_double_tap():
     mock_daemon = MagicMock()
     mock_daemon._read_state.return_value = {
@@ -313,3 +457,85 @@ def test_dispatch_long_press():
     parsed = json.loads(result)
     assert parsed["status"] == "ok"
     mock_lp.assert_called_once()
+
+
+def test_dispatch_app_state_ios_uses_backend():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "dev1",
+        "target_id": "dev1",
+        "ios_runtime": "device",
+    }
+    with patch(
+        "phone_cli.ios.app_state",
+        return_value={"bundle_id": "com.example.demo", "foreground": True},
+    ) as mock_state:
+        result = dispatch_command(
+            "app_state",
+            {"bundle_id": "com.example.demo"},
+            mock_daemon,
+        )
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["foreground"] is True
+    mock_state.assert_called_once_with(
+        bundle_id="com.example.demo",
+        device_id="dev1",
+        state=mock_daemon._read_state.return_value,
+    )
+
+
+def test_dispatch_wait_for_app_ios_uses_backend():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "dev1",
+        "target_id": "dev1",
+        "ios_runtime": "device",
+    }
+    with patch(
+        "phone_cli.ios.wait_for_app",
+        return_value={"bundle_id": "com.example.demo", "foreground": True},
+    ) as mock_wait:
+        result = dispatch_command(
+            "wait_for_app",
+            {"bundle_id": "com.example.demo", "timeout": 5, "state": "running"},
+            mock_daemon,
+        )
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    mock_wait.assert_called_once_with(
+        bundle_id="com.example.demo",
+        timeout=5,
+        wait_state="running",
+        device_id="dev1",
+        state=mock_daemon._read_state.return_value,
+    )
+
+
+def test_dispatch_check_screen_ios_uses_backend():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {
+        "device_type": "ios",
+        "device_id": "dev1",
+        "target_id": "dev1",
+        "ios_runtime": "device",
+    }
+    with patch(
+        "phone_cli.ios.check_screen",
+        return_value={"screen_state": "normal"},
+    ) as mock_check:
+        result = dispatch_command(
+            "check_screen",
+            {"threshold": 0.9},
+            mock_daemon,
+        )
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["screen_state"] == "normal"
+    mock_check.assert_called_once_with(
+        threshold=0.9,
+        device_id="dev1",
+        state=mock_daemon._read_state.return_value,
+    )

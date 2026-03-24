@@ -26,10 +26,60 @@ def _print_json(json_str: str) -> None:
             sys.exit(1)
 
 
+def _print_result(result: dict) -> None:
+    """Print a daemon method result as ok/error JSON."""
+
+    if result.get("error_code"):
+        _print_json(error_response(result["error_code"], result["error_msg"]))
+    else:
+        _print_json(ok_response(result))
+
+
+def _get_selected_instance() -> str | None:
+    """Read the selected CLI instance from the root Click context."""
+
+    ctx = click.get_current_context(silent=True)
+    if ctx is None:
+        return None
+    root = ctx.find_root()
+    obj = getattr(root, "obj", None) or {}
+    return obj.get("instance")
+
+
+def _get_daemon() -> PhoneCLIDaemon:
+    """Create a daemon client for the selected instance, or auto-resolve."""
+
+    selected_instance = _get_selected_instance()
+    if selected_instance:
+        return PhoneCLIDaemon(instance_name=selected_instance)
+    return PhoneCLIDaemon()
+
+
+def _get_start_daemon(device_type: str) -> PhoneCLIDaemon:
+    """Create the daemon used by `start`, validating explicit instance choice."""
+
+    selected_instance = _get_selected_instance()
+    if selected_instance and selected_instance != device_type:
+        raise click.UsageError(
+            "--instance must match start --device-type when both are provided."
+        )
+    if selected_instance:
+        return PhoneCLIDaemon(instance_name=selected_instance)
+    return PhoneCLIDaemon()
+
+
 @click.group()
-def cli():
+@click.option(
+    "--instance",
+    default=None,
+    type=click.Choice(["adb", "hdc", "ios"]),
+    help="Target daemon instance for this command.",
+)
+@click.pass_context
+def cli(ctx, instance):
     """phone-cli — AI-powered phone automation CLI."""
-    pass
+    ctx.ensure_object(dict)
+    ctx.obj["instance"] = instance
 
 
 @cli.command()
@@ -41,36 +91,60 @@ def version():
 @cli.command()
 @click.option("--device-type", default="adb", type=click.Choice(["adb", "hdc", "ios"]))
 @click.option("--device-id", default=None)
+@click.option(
+    "--runtime",
+    "ios_runtime",
+    default=None,
+    type=click.Choice(["device", "simulator", "app-on-mac"]),
+)
 @click.option("--foreground", is_flag=True, hidden=True)
-def start(device_type, device_id, foreground):
+def start(device_type, device_id, ios_runtime, foreground):
     """Start the phone-cli daemon."""
-    daemon = PhoneCLIDaemon()
-    result = daemon.start(device_type=device_type, device_id=device_id, foreground=foreground)
+    daemon = _get_start_daemon(device_type)
+    result = daemon.start(
+        device_type=device_type,
+        device_id=device_id,
+        ios_runtime=ios_runtime,
+        foreground=foreground,
+    )
     if not foreground:
-        _print_json(ok_response(result))
+        _print_result(result)
 
 
 @cli.command()
-def stop():
+@click.option("--all", "stop_all", is_flag=True, help="Stop all running daemon instances.")
+def stop(stop_all):
     """Stop the phone-cli daemon."""
-    daemon = PhoneCLIDaemon()
-    result = daemon.stop()
-    _print_json(ok_response(result))
+    daemon = _get_daemon()
+    result = daemon.stop(all_instances=stop_all)
+    _print_result(result)
 
 
 @cli.command()
 def status():
     """Check daemon status."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     result = daemon.status()
-    _print_json(ok_response(result))
+    _print_result(result)
 
 
 @cli.command()
 def devices():
     """List connected devices."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("devices"))
+
+
+@cli.command(name="detect-runtimes")
+@click.option("--device-type", default="ios", type=click.Choice(["ios"]))
+def detect_runtimes(device_type):
+    """Detect available runtime candidates before starting the daemon."""
+    from phone_cli.ios.runtime.discovery import detect_ios_runtimes, resolve_runtime_selection
+
+    result = detect_ios_runtimes()
+    payload = result.to_dict()
+    payload["selection"] = resolve_runtime_selection(result).to_dict()
+    _print_json(ok_response(payload))
 
 
 @cli.command()
@@ -79,7 +153,7 @@ def devices():
 @click.option("--step", default=None, type=int, help="Step number for naming")
 def screenshot(resize, task_id, step):
     """Take a screenshot."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     args = {"task_id": task_id}
     if resize:
         args["resize"] = resize
@@ -93,7 +167,7 @@ def screenshot(resize, task_id, step):
 @click.argument("y", type=int)
 def tap(x, y):
     """Tap at coordinates (0-999 relative)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("tap", {"x": x, "y": y}))
 
 
@@ -102,7 +176,7 @@ def tap(x, y):
 @click.argument("y", type=int)
 def double_tap(x, y):
     """Double tap at coordinates (0-999 relative)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("double_tap", {"x": x, "y": y}))
 
 
@@ -111,7 +185,7 @@ def double_tap(x, y):
 @click.argument("y", type=int)
 def long_press(x, y):
     """Long press at coordinates (0-999 relative)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("long_press", {"x": x, "y": y}))
 
 
@@ -122,7 +196,7 @@ def long_press(x, y):
 @click.argument("y2", type=int)
 def swipe(x1, y1, x2, y2):
     """Swipe from (x1,y1) to (x2,y2) (0-999 relative)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("swipe", {"start_x": x1, "start_y": y1, "end_x": x2, "end_y": y2}))
 
 
@@ -130,43 +204,50 @@ def swipe(x1, y1, x2, y2):
 @click.argument("text")
 def type_text(text):
     """Type text into focused input."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("type", {"text": text}))
 
 
 @cli.command()
 def back():
     """Press back button."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("back"))
 
 
 @cli.command()
 def home():
     """Press home button."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("home"))
 
 
 @cli.command()
-@click.argument("app_name")
-def launch(app_name):
-    """Launch an app by name."""
-    daemon = PhoneCLIDaemon()
-    _print_json(daemon.send_command("launch", {"app_name": app_name}))
+@click.argument("app_name", required=False)
+@click.option("--bundle-id", default=None, help="Launch by bundle identifier")
+@click.option("--app-path", default=None, type=click.Path(exists=True), help="Launch by .app path")
+def launch(app_name, bundle_id, app_path):
+    """Launch an app by name, bundle ID, or .app path."""
+    daemon = _get_daemon()
+    args = {
+        "app_name": app_name,
+        "bundle_id": bundle_id,
+        "app_path": os.path.abspath(app_path) if app_path else None,
+    }
+    _print_json(daemon.send_command("launch", args))
 
 
 @cli.command(name="get-current-app")
 def get_current_app():
     """Get current foreground app."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("get_current_app"))
 
 
 @cli.command(name="ui-tree")
 def ui_tree():
     """Dump UI accessibility tree."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("ui_tree"))
 
 
@@ -174,14 +255,14 @@ def ui_tree():
 @click.argument("device_id")
 def set_device(device_id):
     """Set target device by ID."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("set_device", {"device_id": device_id}))
 
 
 @cli.command(name="device-info")
 def device_info():
     """Show current device info."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("device_info"))
 
 
@@ -189,7 +270,7 @@ def device_info():
 @click.option("--all", "clean_all", is_flag=True, help="Remove all screenshots")
 def clean_screenshots(clean_all):
     """Clean old screenshots."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("clean_screenshots", {"all": clean_all}))
 
 
@@ -198,7 +279,7 @@ def clean_screenshots(clean_all):
 @click.option("--task", "task_id", default=None, help="Filter by task ID")
 def log(tail, task_id):
     """View operation logs."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     args = {"tail": tail}
     if task_id:
         args["task_id"] = task_id
@@ -209,26 +290,31 @@ def log(tail, task_id):
 
 @cli.command(name="app-state")
 @click.option("--package", "-p", default=None, help="Target package name")
-def app_state(package):
+@click.option("--bundle-id", default=None, help="Target iOS bundle identifier")
+def app_state(package, bundle_id):
     """Get app foreground state (replaces screenshot-based verification)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     args = {}
     if package:
         args["package"] = package
+    if bundle_id:
+        args["bundle_id"] = bundle_id
     _print_json(daemon.send_command("app_state", args))
 
 
 @cli.command(name="wait-for-app")
-@click.argument("package")
+@click.argument("package", required=False)
+@click.option("--bundle-id", default=None, help="Target iOS bundle identifier")
 @click.option("--timeout", "-t", default=30, type=int, help="Max wait seconds")
 @click.option("--state", "-s", default="resumed",
               type=click.Choice(["resumed", "running"]),
               help="Target state to wait for")
-def wait_for_app(package, timeout, state):
+def wait_for_app(package, bundle_id, timeout, state):
     """Wait for an app to reach target state (replaces sleep + screenshot polling)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("wait_for_app", {
         "package": package,
+        "bundle_id": bundle_id,
         "timeout": timeout,
         "state": state,
     }))
@@ -239,7 +325,7 @@ def wait_for_app(package, timeout, state):
               help="Ratio threshold for all-black/all-white detection")
 def check_screen(threshold):
     """Check screen health (all-black/all-white detection)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("check_screen", {
         "threshold": threshold,
     }))
@@ -253,7 +339,7 @@ def check_screen(threshold):
 @click.option("--lines", "-n", default=20, type=int, help="Number of log lines")
 def app_log(package, filter_type, lines):
     """Get app logs (replaces manual adb logcat)."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     args = {"filter": filter_type, "lines": lines}
     if package:
         args["package"] = package
@@ -265,7 +351,7 @@ def app_log(package, filter_type, lines):
 @click.option("--launch", is_flag=True, help="Launch app after installation")
 def install(apk_path, launch):
     """Install APK and optionally launch it."""
-    daemon = PhoneCLIDaemon()
+    daemon = _get_daemon()
     _print_json(daemon.send_command("install", {
         "apk_path": os.path.abspath(apk_path),
         "launch": launch,

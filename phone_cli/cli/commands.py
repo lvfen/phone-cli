@@ -10,6 +10,7 @@ import xml.etree.ElementTree as ET
 from typing import Any
 
 from phone_cli.cli.output import ErrorCode, error_response, ok_response
+from phone_cli.ios.runtime.base import UnsupportedOperationError
 
 
 class CoordConverter:
@@ -48,6 +49,8 @@ def dispatch_command(cmd: str, args: dict, daemon: Any) -> str:
         return error_response(ErrorCode.UNKNOWN_COMMAND, f"Unknown command: {cmd}")
     try:
         return handler(args, daemon)
+    except UnsupportedOperationError as e:
+        return error_response(ErrorCode.UNSUPPORTED_OPERATION, str(e))
     except Exception as e:
         return error_response(ErrorCode.COMMAND_FAILED, str(e))
 
@@ -56,7 +59,7 @@ def dispatch_command(cmd: str, args: dict, daemon: Any) -> str:
 
 def _get_device_module(daemon: Any):
     """Return the adb, hdc, or ios module based on daemon state."""
-    state = daemon._read_state()
+    state = _get_state(daemon)
     device_type = state.get("device_type", "adb")
     if device_type == "hdc":
         from phone_cli import hdc
@@ -69,26 +72,127 @@ def _get_device_module(daemon: Any):
         return adb
 
 
-def _get_device_id(args: dict, daemon: Any) -> str | None:
-    """Get device_id from args or daemon state."""
+def _get_state(daemon: Any) -> dict[str, Any]:
+    """Read daemon state once for the current command."""
+
+    return daemon._read_state()
+
+
+def _get_target_id(args: dict, daemon: Any) -> str | None:
+    """Get target ID from args or daemon state."""
+
+    state = _get_state(daemon)
     device_id = args.get("device_id")
     if device_id:
         return device_id
-    state = daemon._read_state()
+    if state.get("device_type") == "ios":
+        return state.get("target_id") or state.get("device_id")
     return state.get("device_id")
 
 
 def _get_screen_size(daemon: Any) -> tuple[int, int]:
-    """Get screen size from daemon state, default [1080, 2400]."""
-    state = daemon._read_state()
-    size = state.get("screen_size", [1080, 2400])
+    """Get screen size from daemon state or refresh it from the active backend."""
+
+    state = _get_state(daemon)
+    device_type = state.get("device_type", "adb")
+    target_id = state.get("target_id") or state.get("device_id")
+    size = state.get("screen_size")
+
+    if device_type == "ios" and size == [1080, 2400]:
+        from phone_cli import ios
+
+        if target_id:
+            try:
+                width, height = ios.get_screen_size(device_id=target_id, state=state)
+                size = [width, height]
+                state["screen_size"] = size
+                daemon._write_state(state)
+            except Exception:
+                pass
+    elif device_type == "adb":
+        from phone_cli import adb
+
+        try:
+            width, height = adb.get_screen_size(device_id=target_id)
+            size = [width, height]
+            if state.get("screen_size") != size:
+                state["screen_size"] = size
+                daemon._write_state(state)
+        except Exception:
+            pass
+
+    if not size:
+        size = [1080, 2400]
     return size[0], size[1]
 
 
 def _get_device_type(daemon: Any) -> str:
     """Get device_type from daemon state."""
-    state = daemon._read_state()
+    state = _get_state(daemon)
     return state.get("device_type", "adb")
+
+
+def _call_device_method(
+    daemon: Any,
+    method_name: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    """Call a method on the active device module/backend."""
+
+    device_mod = _get_device_module(daemon)
+    state = _get_state(daemon)
+    if state.get("device_type") == "ios":
+        kwargs["state"] = state
+    method = getattr(device_mod, method_name)
+    return method(*args, **kwargs)
+
+
+def _sync_ios_state(
+    daemon: Any,
+    device_id: str | None,
+    *,
+    bundle_id: str | None = None,
+) -> None:
+    """Persist the latest iOS runtime state derived from the active backend."""
+
+    state = _get_state(daemon)
+    if state.get("device_type") != "ios":
+        return
+
+    try:
+        from phone_cli import ios
+
+        runtime = state.get("ios_runtime")
+        backend = ios.get_backend(state=state)
+
+        resolved_bundle_id = bundle_id
+        getter = getattr(backend, "get_bound_bundle_id", None)
+        if callable(getter):
+            backend_bundle_id = getter(device_id)
+            if backend_bundle_id is not None:
+                resolved_bundle_id = backend_bundle_id
+        state["bundle_id"] = resolved_bundle_id
+
+        getter = getattr(backend, "get_bound_window_id", None)
+        if callable(getter):
+            state["window_id"] = getter(device_id)
+
+        should_refresh_screen_size = (
+            runtime != "app_on_mac" or state.get("window_id") is not None
+        )
+        if should_refresh_screen_size:
+            try:
+                width, height = ios.get_screen_size(device_id=device_id, state=state)
+                state["screen_size"] = [width, height]
+            except Exception:
+                pass
+
+        if runtime:
+            state["capabilities"] = ios.get_capabilities(state=state)
+        daemon._write_state(state)
+    except Exception:
+        pass
 
 
 # ── Command handlers ─────────────────────────────────────────────────
@@ -101,54 +205,107 @@ def _cmd_status(args: dict, daemon: Any) -> str:
 @_register("devices")
 def _cmd_devices(args: dict, daemon: Any) -> str:
     device_type = _get_device_type(daemon)
-    if device_type == "hdc":
-        from phone_cli import hdc
-        devices = hdc.list_devices()
-    elif device_type == "ios":
-        from phone_cli import ios
-        devices = ios.list_devices()
-    else:
-        from phone_cli import adb
-        devices = adb.list_devices()
-    device_list = [
-        {
+    state = _get_state(daemon)
+    devices = _call_device_method(daemon, "list_devices")
+    device_list = []
+    for d in devices:
+        item = {
             "device_id": d.device_id,
             "model": getattr(d, "model", ""),
             "status": getattr(d, "status", ""),
         }
-        for d in devices
-    ]
-    return ok_response({"devices": device_list})
+        if device_type == "ios":
+            item.update(
+                {
+                    "target_id": getattr(d, "target_id", d.device_id),
+                    "runtime": getattr(d, "runtime", state.get("ios_runtime")),
+                    "name": getattr(d, "name", getattr(d, "model", "")),
+                }
+            )
+        device_list.append(item)
+    payload = {"devices": device_list}
+    if device_type == "ios":
+        payload["ios_runtime"] = state.get("ios_runtime")
+    return ok_response(payload)
+
+
+@_register("detect_runtimes")
+def _cmd_detect_runtimes(args: dict, daemon: Any) -> str:
+    device_type = args.get("device_type", "ios")
+    if device_type != "ios":
+        return error_response(
+            ErrorCode.RUNTIME_NOT_SUPPORTED,
+            f"detect_runtimes is only supported for iOS, current: {device_type}",
+        )
+
+    from phone_cli.ios.runtime.discovery import detect_ios_runtimes, resolve_runtime_selection
+
+    result = detect_ios_runtimes()
+    payload = result.to_dict()
+    payload["selection"] = resolve_runtime_selection(result).to_dict()
+    return ok_response(payload)
 
 
 @_register("set_device")
 def _cmd_set_device(args: dict, daemon: Any) -> str:
     device_id = args.get("device_id")
-    state = daemon._read_state()
+    state = _get_state(daemon)
     state["device_id"] = device_id
+    if state.get("device_type") == "ios":
+        state["target_id"] = device_id
     daemon._write_state(state)
-    return ok_response({"device_id": device_id})
+    return ok_response({
+        "device_id": state.get("device_id"),
+        "target_id": state.get("target_id"),
+    })
 
 
 @_register("device_info")
 def _cmd_device_info(args: dict, daemon: Any) -> str:
-    state = daemon._read_state()
-    return ok_response({
+    state = _get_state(daemon)
+    if state.get("device_type") == "ios":
+        _sync_ios_state(
+            daemon,
+            state.get("target_id") or state.get("device_id"),
+            bundle_id=state.get("bundle_id"),
+        )
+    state = _get_state(daemon)
+    payload = {
         "device_type": state.get("device_type"),
         "device_id": state.get("device_id"),
+        "target_id": state.get("target_id"),
         "screen_size": state.get("screen_size"),
         "device_status": state.get("device_status"),
-    })
+    }
+    if state.get("device_type") == "ios":
+        payload.update(
+            {
+                "ios_runtime": state.get("ios_runtime"),
+                "bundle_id": state.get("bundle_id"),
+                "window_id": state.get("window_id"),
+                "capabilities": state.get("capabilities"),
+            }
+        )
+    return ok_response(payload)
 
 
 @_register("screenshot")
 def _cmd_screenshot(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
-    device_mod = _get_device_module(daemon)
+    device_id = _get_target_id(args, daemon)
     try:
-        screenshot = device_mod.get_screenshot(device_id=device_id)
+        screenshot = _call_device_method(
+            daemon,
+            "get_screenshot",
+            device_id=device_id,
+        )
     except Exception as e:
         return error_response(ErrorCode.SCREENSHOT_FAILED, str(e))
+    if _get_device_type(daemon) == "ios":
+        _sync_ios_state(
+            daemon,
+            device_id,
+            bundle_id=_get_state(daemon).get("bundle_id"),
+        )
 
     # Determine filename
     step = args.get("step")
@@ -195,54 +352,59 @@ def _cmd_screenshot(args: dict, daemon: Any) -> str:
 
 @_register("tap")
 def _cmd_tap(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
-    device_mod = _get_device_module(daemon)
-    device_mod.tap(x, y, device_id=device_id)
+    _call_device_method(daemon, "tap", x, y, device_id=device_id)
     return ok_response({"x": x, "y": y})
 
 
 @_register("double_tap")
 def _cmd_double_tap(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
-    device_mod = _get_device_module(daemon)
-    device_mod.double_tap(x, y, device_id=device_id)
+    _call_device_method(daemon, "double_tap", x, y, device_id=device_id)
     return ok_response({"x": x, "y": y})
 
 
 @_register("long_press")
 def _cmd_long_press(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
-    device_mod = _get_device_module(daemon)
-    device_mod.long_press(x, y, device_id=device_id)
+    _call_device_method(daemon, "long_press", x, y, device_id=device_id)
     return ok_response({"x": x, "y": y})
 
 
 @_register("swipe")
 def _cmd_swipe(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     sx, sy = conv.to_absolute(args["start_x"], args["start_y"])
     ex, ey = conv.to_absolute(args["end_x"], args["end_y"])
     duration_ms = args.get("duration_ms")
-    device_mod = _get_device_module(daemon)
-    device_mod.swipe(sx, sy, ex, ey, duration_ms=duration_ms, device_id=device_id)
+    _call_device_method(
+        daemon,
+        "swipe",
+        sx,
+        sy,
+        ex,
+        ey,
+        duration_ms=duration_ms,
+        device_id=device_id,
+    )
     return ok_response({"start": [sx, sy], "end": [ex, ey]})
 
 
 @_register("type")
 def _cmd_type(args: dict, daemon: Any) -> str:
     text = args.get("text", "")
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     device_type = _get_device_type(daemon)
 
     if device_type == "adb":
@@ -258,54 +420,88 @@ def _cmd_type(args: dict, daemon: Any) -> str:
         hdc.type_text(text, device_id=device_id)
     elif device_type == "ios":
         from phone_cli import ios
-        ios.clear_text(device_id=device_id)
-        ios.type_text(text, device_id=device_id)
+        state = _get_state(daemon)
+        capabilities = state.get("capabilities") or ios.get_capabilities(state=state)
+        if capabilities.get("clear_text"):
+            ios.clear_text(device_id=device_id, state=state)
+        ios.type_text(text, device_id=device_id, state=state)
     else:
         # For iOS and others, use the device module's type_text directly
-        module = _get_device_module(daemon)
-        module.type_text(text, device_id=device_id)
+        _call_device_method(daemon, "type_text", text, device_id=device_id)
 
     return ok_response({"typed": text})
 
 
 @_register("back")
 def _cmd_back(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
-    device_mod = _get_device_module(daemon)
-    device_mod.back(device_id=device_id)
+    device_id = _get_target_id(args, daemon)
+    _call_device_method(daemon, "back", device_id=device_id)
     return ok_response({})
 
 
 @_register("home")
 def _cmd_home(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
-    device_mod = _get_device_module(daemon)
-    device_mod.home(device_id=device_id)
+    device_id = _get_target_id(args, daemon)
+    _call_device_method(daemon, "home", device_id=device_id)
     return ok_response({})
 
 
 @_register("launch")
 def _cmd_launch(args: dict, daemon: Any) -> str:
-    app_name = args.get("app_name", "")
-    device_id = _get_device_id(args, daemon)
-    device_mod = _get_device_module(daemon)
-    success = device_mod.launch_app(app_name, device_id=device_id)
+    app_name = args.get("app_name")
+    bundle_id = args.get("bundle_id")
+    app_path = args.get("app_path")
+    if not any([app_name, bundle_id, app_path]):
+        return error_response(ErrorCode.COMMAND_FAILED, "app_name, bundle_id, or app_path is required")
+
+    device_id = _get_target_id(args, daemon)
+    device_type = _get_device_type(daemon)
+    if device_type == "ios":
+        success = _call_device_method(
+            daemon,
+            "launch_app",
+            app_name=app_name,
+            bundle_id=bundle_id,
+            app_path=app_path,
+            device_id=device_id,
+        )
+    else:
+        success = _call_device_method(
+            daemon,
+            "launch_app",
+            app_name or "",
+            device_id=device_id,
+        )
     if not success:
-        return error_response(ErrorCode.APP_NOT_FOUND, f"App not found: {app_name}")
-    return ok_response({"app_name": app_name})
+        app_identifier = bundle_id or app_path or app_name or "<unknown>"
+        return error_response(ErrorCode.APP_NOT_FOUND, f"App not found: {app_identifier}")
+    if device_type == "ios":
+        _sync_ios_state(daemon, device_id, bundle_id=bundle_id)
+    return ok_response(
+        {
+            "app_name": app_name,
+            "bundle_id": bundle_id,
+            "app_path": app_path,
+        }
+    )
 
 
 @_register("get_current_app")
 def _cmd_get_current_app(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
-    device_mod = _get_device_module(daemon)
-    app_name = device_mod.get_current_app(device_id=device_id)
+    device_id = _get_target_id(args, daemon)
+    app_name = _call_device_method(daemon, "get_current_app", device_id=device_id)
+    if _get_device_type(daemon) == "ios":
+        _sync_ios_state(
+            daemon,
+            device_id,
+            bundle_id=_get_state(daemon).get("bundle_id"),
+        )
     return ok_response({"app_name": app_name})
 
 
 @_register("ui_tree")
 def _cmd_ui_tree(args: dict, daemon: Any) -> str:
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     device_type = _get_device_type(daemon)
 
     try:
@@ -314,7 +510,16 @@ def _cmd_ui_tree(args: dict, daemon: Any) -> str:
         elif device_type == "hdc":
             return _ui_tree_hdc(device_id)
         elif device_type == "ios":
-            return _ui_tree_ios(device_id)
+            try:
+                result = _call_device_method(daemon, "ui_tree", device_id=device_id)
+                _sync_ios_state(
+                    daemon,
+                    device_id,
+                    bundle_id=_get_state(daemon).get("bundle_id"),
+                )
+                return ok_response(result)
+            except UnsupportedOperationError as e:
+                return error_response(ErrorCode.UI_TREE_UNAVAILABLE, str(e))
         else:
             return error_response(
                 ErrorCode.UI_TREE_UNAVAILABLE,
@@ -490,40 +695,64 @@ def _cmd_log(args: dict, daemon: Any) -> str:
 def _cmd_app_state(args: dict, daemon: Any) -> str:
     """Get app foreground state without taking a screenshot."""
     device_type = _get_device_type(daemon)
-    if device_type != "adb":
-        return error_response(
-            ErrorCode.COMMAND_FAILED,
-            f"app_state is only supported for ADB devices, current: {device_type}",
+    device_id = _get_target_id(args, daemon)
+    bundle_id = args.get("bundle_id") or args.get("package")
+    if device_type == "adb":
+        from phone_cli.adb.device import get_app_state
+
+        result = get_app_state(package=bundle_id, device_id=device_id)
+        return ok_response(result)
+    if device_type == "ios":
+        result = _call_device_method(
+            daemon,
+            "app_state",
+            bundle_id=bundle_id,
+            device_id=device_id,
         )
-    device_id = _get_device_id(args, daemon)
-    from phone_cli.adb.device import get_app_state
-    package = args.get("package")
-    result = get_app_state(package=package, device_id=device_id)
-    return ok_response(result)
+        _sync_ios_state(daemon, device_id, bundle_id=bundle_id)
+        return ok_response(result)
+    return error_response(
+        ErrorCode.UNSUPPORTED_OPERATION,
+        f"app_state is not supported for device type: {device_type}",
+    )
 
 
 @_register("wait_for_app")
 def _cmd_wait_for_app(args: dict, daemon: Any) -> str:
     """Wait for an app to reach a target state with polling."""
     device_type = _get_device_type(daemon)
-    if device_type != "adb":
-        return error_response(
-            ErrorCode.COMMAND_FAILED,
-            f"wait_for_app is only supported for ADB devices, current: {device_type}",
-        )
-    device_id = _get_device_id(args, daemon)
-    package = args.get("package")
-    if not package:
-        return error_response(ErrorCode.COMMAND_FAILED, "package is required")
+    device_id = _get_target_id(args, daemon)
+    bundle_id = args.get("bundle_id") or args.get("package")
+    if not bundle_id:
+        return error_response(ErrorCode.COMMAND_FAILED, "package or bundle_id is required")
     timeout = args.get("timeout", 30)
     target_state = args.get("state", "resumed")
-    from phone_cli.adb.device import wait_for_app
     try:
-        result = wait_for_app(
-            package=package, timeout=timeout,
-            target_state=target_state, device_id=device_id,
+        if device_type == "adb":
+            from phone_cli.adb.device import wait_for_app
+
+            result = wait_for_app(
+                package=bundle_id,
+                timeout=timeout,
+                target_state=target_state,
+                device_id=device_id,
+            )
+            return ok_response(result)
+        if device_type == "ios":
+            result = _call_device_method(
+                daemon,
+                "wait_for_app",
+                bundle_id=bundle_id,
+                timeout=timeout,
+                wait_state=target_state,
+                device_id=device_id,
+            )
+            _sync_ios_state(daemon, device_id, bundle_id=bundle_id)
+            return ok_response(result)
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            f"wait_for_app is not supported for device type: {device_type}",
         )
-        return ok_response(result)
     except TimeoutError as e:
         return error_response(ErrorCode.APP_NOT_RUNNING, str(e))
 
@@ -532,17 +761,26 @@ def _cmd_wait_for_app(args: dict, daemon: Any) -> str:
 def _cmd_check_screen(args: dict, daemon: Any) -> str:
     """Check screen health (all-black/all-white detection)."""
     device_type = _get_device_type(daemon)
-    if device_type != "adb":
-        return error_response(
-            ErrorCode.COMMAND_FAILED,
-            f"check_screen is only supported for ADB devices, current: {device_type}",
-        )
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     threshold = args.get("threshold", 0.95)
-    from phone_cli.adb.device import check_screen_health
     try:
-        result = check_screen_health(threshold=threshold, device_id=device_id)
-        return ok_response(result)
+        if device_type == "adb":
+            from phone_cli.adb.device import check_screen_health
+
+            result = check_screen_health(threshold=threshold, device_id=device_id)
+            return ok_response(result)
+        if device_type == "ios":
+            result = _call_device_method(
+                daemon,
+                "check_screen",
+                threshold=threshold,
+                device_id=device_id,
+            )
+            return ok_response(result)
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            f"check_screen is not supported for device type: {device_type}",
+        )
     except Exception as e:
         return error_response(ErrorCode.SCREEN_CHECK_FAILED, str(e))
 

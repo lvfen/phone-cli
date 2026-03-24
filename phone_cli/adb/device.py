@@ -10,6 +10,33 @@ from phone_cli.config.apps import APP_PACKAGES
 from phone_cli.config.timing import TIMING_CONFIG
 
 
+def get_screen_size(device_id: str | None = None, timeout: int = 5) -> Tuple[int, int]:
+    """
+    Get the current logical display size used by ADB input commands.
+
+    Prefers `wm size` override dimensions when present and swaps width/height
+    for landscape rotations so relative 0-999 coordinates map to the visible
+    screen orientation.
+    """
+
+    adb_prefix = _get_adb_prefix(device_id)
+    result = subprocess.run(
+        adb_prefix + ["shell", "wm", "size"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=timeout,
+    )
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    width, height = _parse_wm_size(output)
+
+    rotation = _get_display_rotation(device_id=device_id, timeout=timeout)
+    if rotation in {1, 3}:
+        width, height = height, width
+
+    return width, height
+
+
 def get_current_app(device_id: str | None = None) -> str:
     """
     Get the currently focused app name.
@@ -656,3 +683,47 @@ def _get_adb_prefix(device_id: str | None) -> list:
     if device_id:
         return ["adb", "-s", device_id]
     return ["adb"]
+
+
+def _parse_wm_size(output: str) -> Tuple[int, int]:
+    """Parse `adb shell wm size` output."""
+
+    override_match = re.search(r"Override size:\s*(\d+)x(\d+)", output)
+    if override_match:
+        return int(override_match.group(1)), int(override_match.group(2))
+
+    physical_match = re.search(r"Physical size:\s*(\d+)x(\d+)", output)
+    if physical_match:
+        return int(physical_match.group(1)), int(physical_match.group(2))
+
+    raise RuntimeError(f"Failed to parse Android screen size from: {output.strip()}")
+
+
+def _get_display_rotation(device_id: str | None = None, timeout: int = 5) -> int | None:
+    """Best-effort parse of current Android display rotation."""
+
+    adb_prefix = _get_adb_prefix(device_id)
+    try:
+        result = subprocess.run(
+            adb_prefix + ["shell", "dumpsys", "input"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=timeout,
+        )
+    except Exception:
+        return None
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    for pattern in (
+        r"SurfaceOrientation:\s*(\d+)",
+        r"surfaceOrientation=\s*(\d+)",
+        r"orientation=(\d+)",
+    ):
+        match = re.search(pattern, output)
+        if match:
+            try:
+                return int(match.group(1))
+            except ValueError:
+                return None
+    return None

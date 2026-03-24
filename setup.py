@@ -31,6 +31,9 @@ setup(
         "ios": [
             "tidevice>=0.12.0",
             "facebook-wda>=1.4.0",
+            "pyobjc-framework-Cocoa",
+            "pyobjc-framework-Quartz",
+            "pyobjc-framework-ApplicationServices",
         ],
         "dev": [
             "pytest>=7.0.0",
