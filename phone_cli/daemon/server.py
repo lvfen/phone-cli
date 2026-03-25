@@ -30,6 +30,7 @@ class DaemonServer:
         )
         self._stop_event = threading.Event()
         self._server_socket: socket.socket | None = None
+        self._acquire_lock = threading.Lock()  # 确保 acquire 操作原子性
         self._handlers: dict[str, Any] = {
             "status": self._cmd_status,
             "acquire": self._cmd_acquire,
@@ -121,29 +122,30 @@ class DaemonServer:
         if not device_type:
             return error_response("invalid_request", "device_type is required")
         timeout = float(args.get("timeout", 300))
-        discovered = self.device_mgr.discover(device_type)
-        if not discovered:
-            return error_response("no_device_available", f"No {device_type} devices found")
-        discovered_ids = [d.device_id for d in discovered]
-        free_id = self.device_mgr.find_free_device(discovered_ids)
-        if free_id:
-            slot = self.device_mgr.get_slot(free_id)
-            if slot is None:
-                port = self.device_mgr.allocate_port(self._port_type(device_type))
-                slot = self.device_mgr.create_slot(free_id, device_type, port)
-            session = self.session_mgr.create(device_type, device_id=free_id, timeout=timeout)
-            self.device_mgr.assign_session(free_id, session.session_id)
-            return ok_response({
-                "session_id": session.session_id, "status": "active",
-                "device_id": free_id, "device_type": device_type, "port": slot.port,
-            })
-        # All busy → queue (non-blocking v1)
-        queue_device = self.device_mgr.find_shortest_queue_device(discovered_ids)
-        if not queue_device:
-            return error_response("no_device_available", "No devices to queue on")
-        session = self.session_mgr.create(device_type, device_id=None, timeout=timeout, status="queued")
-        pos = self.device_mgr.enqueue_session(queue_device, session.session_id)
-        return ok_response({"session_id": session.session_id, "status": "queued", "queue_position": pos})
+        with self._acquire_lock:
+            discovered = self.device_mgr.discover(device_type)
+            if not discovered:
+                return error_response("no_device_available", f"No {device_type} devices found")
+            discovered_ids = [d.device_id for d in discovered]
+            free_id = self.device_mgr.find_free_device(discovered_ids)
+            if free_id:
+                slot = self.device_mgr.get_slot(free_id)
+                if slot is None:
+                    port = self.device_mgr.allocate_port(self._port_type(device_type))
+                    slot = self.device_mgr.create_slot(free_id, device_type, port)
+                session = self.session_mgr.create(device_type, device_id=free_id, timeout=timeout)
+                self.device_mgr.assign_session(free_id, session.session_id)
+                return ok_response({
+                    "session_id": session.session_id, "status": "active",
+                    "device_id": free_id, "device_type": device_type, "port": slot.port,
+                })
+            # All busy → queue (non-blocking v1)
+            queue_device = self.device_mgr.find_shortest_queue_device(discovered_ids)
+            if not queue_device:
+                return error_response("no_device_available", "No devices to queue on")
+            session = self.session_mgr.create(device_type, device_id=None, timeout=timeout, status="queued")
+            pos = self.device_mgr.enqueue_session(queue_device, session.session_id)
+            return ok_response({"session_id": session.session_id, "status": "queued", "queue_position": pos})
 
     def _cmd_operate(self, args: dict) -> str:
         session_id = args.get("session_id")
