@@ -257,19 +257,6 @@ Discover available devices.
 - All device commands go through the allocated server.
 - On disconnect: kill server, release port.
 
-### DeviceSlot
-
-```python
-@dataclass
-class DeviceSlot:
-    device_id: str
-    device_type: str              # "ios" | "adb" | "hdc"
-    port: int                     # Allocated port
-    current_session_id: str | None
-    process: subprocess.Popen | None  # wdaproxy / adb server subprocess
-    connected_at: float
-```
-
 ## Client API
 
 ```python
@@ -281,7 +268,7 @@ class PhoneClient:
         self._session_id: str | None = None
 
     def acquire(self, device_id: str, device_type: str = "auto",
-                timeout: float = 300) -> dict:
+                timeout: float = 300, wait: bool = True) -> dict:
         """Acquire a device. Stores session_id internally."""
 
     def tap(self, x: int, y: int) -> dict:
@@ -329,6 +316,123 @@ All `tap`/`swipe`/`screenshot`/etc. methods call `_operate(action, **args)` inte
 - Single AI session: acquires device, gets default port (8100/5037), behavior identical to before.
 - Existing CLI commands continue to work.
 - `phone-cli start --device-type ios` starts the global daemon and auto-acquires the specified device type.
+
+## Daemon Startup & Recovery
+
+### Startup Sequence
+
+1. Check PID file (`~/.phone-cli/phone-cli.pid`):
+   - PID exists and process alive → daemon already running, exit with error.
+   - PID exists but process dead → stale PID, clean up and continue.
+   - No PID file → fresh start.
+2. Clean stale socket: remove `phone-cli.sock` if it exists (leftover from crash).
+3. Scan for orphan subprocesses in known port ranges:
+   - Check ports 8100-8199 for orphan `tidevice wdaproxy` processes → kill them.
+   - Check ports 5037-5099 for orphan `adb` server processes → `adb -P <port> kill-server`.
+   - Check ports 5100-5199 for orphan `hdc` server processes → kill them.
+4. Write new PID file.
+5. Bind Unix socket, start accept loop.
+
+### Shutdown (SIGTERM / `phone-cli stop`)
+
+1. Stop accepting new connections.
+2. Expire all active sessions (no notification to clients; clients will get `connection_refused` on next attempt).
+3. Terminate all device subprocesses (wdaproxy, adb servers) with SIGTERM, wait 5s, SIGKILL if needed.
+4. Remove socket file and PID file.
+
+### Crash Recovery
+
+If the daemon crashes (SIGKILL, OOM, etc.):
+- Stale socket and PID file remain on disk.
+- Orphan subprocesses (wdaproxy, adb servers) keep running, holding ports.
+- Next `phone-cli start` triggers the startup sequence above, which cleans everything up.
+- Clients get `connection_refused` and must re-acquire.
+
+## Concurrency Model
+
+The daemon uses a **threading model**:
+
+- **Main thread**: Unix socket accept loop.
+- **Worker threads**: One thread per client connection (short-lived, handles one request-response).
+- **Watchdog thread**: Periodic timeout scanning.
+- **Thread safety**: `SessionManager` and `DeviceManager` use a single `threading.Lock` each. All state mutations go through the lock. Device operations (subprocess calls) run outside the lock to avoid blocking other sessions.
+
+Per-device serialization: `DeviceManager` holds a `threading.Lock` per `DeviceSlot`. Two operations on different devices run in parallel; two operations on the same device are serialized.
+
+## Device Access Model
+
+**Exclusive access**: Each device is held by at most one active session at a time. This is intentional — concurrent operations on the same device (tap + screenshot) produce unpredictable results. Read-only operations (list_devices, status) do not require a session.
+
+## Queue Activation
+
+When a session is queued (device busy), the `acquire` call **blocks**:
+
+1. Client sends `acquire` request.
+2. Daemon sees device busy → creates session with status `queued`, adds to `DeviceSlot.wait_queue`.
+3. Daemon **holds the socket connection open** (does not send a response yet).
+4. When the current session releases/expires → daemon pops next from `wait_queue`, activates it, sends the `acquire` response with `"status": "active"` over the held connection.
+5. Client-side timeout: if the client doesn't want to wait forever, it can set a socket timeout. On timeout, daemon detects the closed connection and removes the queued session.
+
+This avoids polling and keeps the client API simple (`acquire` returns only when the device is ready).
+
+## DeviceSlot (updated)
+
+```python
+@dataclass
+class DeviceSlot:
+    device_id: str
+    device_type: str                    # "ios" | "adb" | "hdc"
+    port: int                           # Allocated port
+    current_session_id: str | None
+    wait_queue: list[str]               # Queued session_ids, FIFO order
+    process: subprocess.Popen | None    # wdaproxy / adb server subprocess
+    lock: threading.Lock                # Per-device operation lock
+    connected_at: float
+```
+
+## Port Allocation TOCTOU Mitigation
+
+The bind-check has a TOCTOU window: between closing the test socket and starting the real service, an external process could grab the port. Mitigation:
+
+- If the service (wdaproxy, adb server) fails to start on the allocated port, catch the error, mark the port as unavailable, and retry with the next port in range.
+- Retry up to 3 times before raising `PortExhaustedError`.
+- In practice, the window is milliseconds and collisions are rare.
+
+## Device Health Monitoring
+
+The watchdog thread also monitors device connectivity:
+
+- Every `HEARTBEAT_INTERVAL` (30s), check if the device subprocess (wdaproxy, adb server) is still alive.
+- If subprocess has exited unexpectedly:
+  - Mark the active session as `"error"` state.
+  - Next `operate` call returns `{"ok": false, "error": "device_disconnected", "msg": "..."}`.
+  - Client can `release` and re-`acquire` to retry.
+- Physical device disconnect (USB unplug) is detected via subprocess exit (wdaproxy exits when device disappears) or via platform-specific checks (adb devices, tidevice list).
+
+## Error Taxonomy
+
+| Error Code | When | HTTP-like |
+|---|---|---|
+| `session_not_found` | Unknown or already-released session_id | 404 |
+| `session_expired` | Session timed out | 410 |
+| `device_not_found` | Device ID not found in discovery | 404 |
+| `device_busy` | Device held by another session (only if non-blocking acquire is added later) | 409 |
+| `device_disconnected` | Device lost during session | 503 |
+| `port_exhausted` | All ports in range occupied | 503 |
+| `operation_failed` | Device command returned error | 500 |
+| `invalid_request` | Malformed JSON or missing fields | 400 |
+| `daemon_shutting_down` | Daemon received SIGTERM | 503 |
+
+## Auto-Detection (`device_type: "auto"`)
+
+When `device_type` is `"auto"`, the daemon resolves it:
+
+1. If `device_id` matches a known ADB device (`adb devices`) → `"adb"`.
+2. If `device_id` matches a known HDC device (`hdc list targets`) → `"hdc"`.
+3. If `device_id` matches a known iOS device (`tidevice list`) → `"ios"`.
+4. If no match → return `{"ok": false, "error": "device_not_found"}`.
+
+Discovery is cached for 10 seconds to avoid repeated subprocess calls.
 
 ## Testing Strategy
 
