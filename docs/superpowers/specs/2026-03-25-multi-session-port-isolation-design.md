@@ -1,75 +1,75 @@
-# Multi-Session Port Isolation: Central Daemon Design
+# 多会话端口隔离：中央守护进程设计
 
-## Problem
+## 问题
 
-phone-cli currently assigns fixed ports per platform (iOS WDA: 8100, ADB TCP: 5555, HDC TCP: 5555). When multiple AI sessions operate devices concurrently, port collisions and operation races make parallel automation impossible.
+phone-cli 目前为每个平台分配固定端口（iOS WDA: 8100，ADB TCP: 5555，HDC TCP: 5555）。当多个 AI 会话同时操作设备时，端口冲突和操作竞争使并行自动化无法实现。
 
-## Decision
+## 决策
 
-Replace the per-device-type daemon instances with a single global daemon that owns all device connections, port allocation, and session lifecycle. AI sessions become stateless clients that acquire/release devices through the daemon.
+用一个全局守护进程替代按设备类型分实例的守护进程架构。全局守护进程统一管理所有设备连接、端口分配和会话生命周期。AI 会话作为无状态客户端，通过守护进程申请/释放设备。
 
-## Architecture
+## 架构
 
 ```
-AI Session 1 ──┐
-AI Session 2 ──┤──▶ Central Daemon ──▶ Device A (iOS, port 8100)
-AI Session 3 ──┘     (single process)  Device B (iOS, port 8101)
-                                       Device C (Android, ADB server :5038)
+AI 会话 1 ──┐
+AI 会话 2 ──┤──▶ 中央守护进程 ──▶ 设备 A (iOS, 端口 8100)
+AI 会话 3 ──┘    (单进程)        设备 B (iOS, 端口 8101)
+                                 设备 C (Android, ADB server :5038)
 ```
 
-### Why a Central Daemon
+### 为什么选择中央守护进程
 
-- All device operations run in one process: serial execution per device, no locks needed.
-- Port allocation is process-internal: bind-check is sufficient, no file locks.
-- Timeout enforcement is centralized: one watchdog thread, deterministic cleanup.
-- Simpler than distributed coordination (file locks, PID validation, stale cleanup).
+- 所有设备操作在同一进程内执行：每设备串行执行，无需加锁。
+- 端口分配在进程内部完成：bind 检测即可，无需文件锁。
+- 超时管理集中化：一个 watchdog 线程，确定性清理。
+- 比分布式协调（文件锁、PID 验证、残留清理）更简单。
 
-## Module Layout
+## 模块布局
 
 ```
 phone_cli/
 ├── daemon/
-│   ├── server.py        # Daemon main loop, Unix socket server, lifecycle
-│   ├── session.py       # SessionManager: session create/activate/expire/release
-│   ├── device.py        # DeviceManager: connect/disconnect/execute, port allocation
-│   ├── watchdog.py      # TimeoutWatchdog: idle session expiry
-│   └── protocol.py      # IPC request/response schema, command dispatch
-├── client.py            # PhoneClient: lightweight client for AI sessions
+│   ├── server.py        # 守护进程主循环，Unix socket 服务器，生命周期
+│   ├── session.py       # SessionManager：会话创建/激活/过期/释放
+│   ├── device.py        # DeviceManager：连接/断开/执行，端口分配
+│   ├── watchdog.py      # TimeoutWatchdog：空闲会话超时回收
+│   └── protocol.py      # IPC 协议定义（请求/响应格式，命令分发）
+├── client.py            # PhoneClient：AI 会话使用的轻量客户端
 ├── config/
-│   └── ports.py         # Port range constants, bind-check utility
-├── adb/connection.py    # Unchanged, called by DeviceManager internally
-├── hdc/connection.py    # Unchanged, called by DeviceManager internally
-└── ios/connection.py    # Unchanged, called by DeviceManager internally
+│   └── ports.py         # 端口范围常量，bind 检测工具函数
+├── adb/connection.py    # 不变，被 DeviceManager 内部调用
+├── hdc/connection.py    # 不变，被 DeviceManager 内部调用
+└── ios/connection.py    # 不变，被 DeviceManager 内部调用
 ```
 
-## Port Allocation
+## 端口分配
 
-### Ranges
+### 端口范围
 
-| Platform    | Purpose       | Default | Dynamic Range |
-|-------------|---------------|---------|---------------|
-| iOS WDA     | wdaproxy      | 8100    | 8100-8199     |
-| ADB Server  | adb -P        | 5037    | 5037-5099     |
-| HDC Server  | hdc server    | 5100    | 5100-5199     |
+| 平台 | 用途 | 默认端口 | 动态范围 |
+|------|------|----------|----------|
+| iOS WDA | wdaproxy | 8100 | 8100-8199 |
+| ADB Server | adb -P | 5037 | 5037-5099 |
+| HDC Server | hdc server | 5100 | 5100-5199 |
 
-### Allocation Algorithm
+### 分配算法
 
-Runs inside the daemon process (single-threaded allocation, no race conditions):
+在守护进程内部执行（单线程分配，无竞态条件）：
 
 ```
 for port in range(start, end):
-    1. bind-check: socket.bind(('127.0.0.1', port))
-       - Fails → port occupied by external process → skip
-    2. Check internal registry: port already assigned to another device?
-       - Yes → skip
-    3. Assign port, record in registry → return port
+    1. bind 检测：socket.bind(('127.0.0.1', port))
+       - 失败 → 端口被外部进程占用 → 跳过
+    2. 检查内部注册表：端口是否已分配给其他设备？
+       - 是 → 跳过
+    3. 分配端口，记录到注册表 → 返回端口
 
-If all ports exhausted → raise PortExhaustedError
+所有端口耗尽 → 抛出 PortExhaustedError
 ```
 
-Default port is tried first for backward compatibility (single-session gets 8100/5037).
+优先尝试默认端口以保持向后兼容（单会话场景下仍然拿到 8100/5037）。
 
-### Bind Check Implementation
+### Bind 检测实现
 
 ```python
 def is_port_available(port: int) -> bool:
@@ -81,56 +81,56 @@ def is_port_available(port: int) -> bool:
             return False
 ```
 
-bind-check catches all occupied states including TIME_WAIT, unlike connect-check which only detects listening ports.
+bind 检测能捕获所有被占用状态（包括 TIME_WAIT），而 connect 检测只能发现正在监听的端口。
 
-## Session Lifecycle
+## 会话生命周期
 
-### States
+### 状态
 
 ```
-acquire() called
+acquire() 调用
     │
-    ├── device free ──▶ ACTIVE
+    ├── 设备空闲 ──▶ ACTIVE（活跃）
     │
-    └── device busy ──▶ QUEUED ──(prev session released)──▶ ACTIVE
-                                                               │
-                                             ┌─────────────────┤
-                                             ▼                 ▼
-                                         RELEASED          EXPIRED
-                                      (AI calls release)  (timeout)
+    └── 设备被占 ──▶ QUEUED（排队）──(前一会话释放)──▶ ACTIVE
+                                                          │
+                                        ┌─────────────────┤
+                                        ▼                 ▼
+                                    RELEASED          EXPIRED
+                                 (AI 主动释放)      (超时过期)
 ```
 
-### Session Data
+### 会话数据
 
 ```python
 @dataclass
 class Session:
     session_id: str         # UUID
-    device_id: str          # Target device identifier
+    device_id: str          # 目标设备标识
     device_type: str        # "ios" | "adb" | "hdc"
     status: str             # "active" | "queued" | "released" | "expired"
-    acquired_at: float      # Time when session became active
-    last_active_at: float   # Updated on every operate/heartbeat
-    timeout: float          # Idle timeout in seconds (default 300)
-    created_at: float       # Time when acquire was called
+    acquired_at: float      # 会话变为 active 的时间
+    last_active_at: float   # 每次 operate/heartbeat 时更新
+    timeout: float          # 空闲超时秒数（默认 300）
+    created_at: float       # acquire 调用的时间
 ```
 
-### Timeout
+### 超时机制
 
-- Default: 300 seconds (5 minutes) of no operate/heartbeat calls.
-- Configurable per-session via `acquire(timeout=N)`.
-- Watchdog thread checks every 10 seconds.
-- On expiry: session marked expired, device disconnected, port released, next queued session activated.
+- 默认：300 秒（5 分钟）无 operate/heartbeat 调用则过期。
+- 每个会话可通过 `acquire(timeout=N)` 自定义超时时间。
+- Watchdog 线程每 10 秒检查一次。
+- 过期时：标记会话为 expired，断开设备连接，释放端口，激活队列中的下一个会话。
 
-## IPC Protocol
+## IPC 协议
 
-Communication over Unix socket `~/.phone-cli/phone-cli.sock`, JSON newline-delimited.
+通过 Unix socket `~/.phone-cli/phone-cli.sock` 通信，JSON 换行分隔。
 
-### Commands
+### 命令
 
 #### acquire
 
-Request a device connection.
+请求设备连接。
 
 ```json
 {
@@ -143,7 +143,7 @@ Request a device connection.
 }
 ```
 
-Response (success, device available):
+响应（成功，设备可用）：
 ```json
 {
   "ok": true,
@@ -154,7 +154,7 @@ Response (success, device available):
 }
 ```
 
-Response (device busy, queued):
+响应（设备被占，排队中）：
 ```json
 {
   "ok": true,
@@ -166,7 +166,7 @@ Response (device busy, queued):
 
 #### operate
 
-Execute a device action. Resets the idle timeout timer.
+执行设备操作。每次调用会重置空闲超时计时器。
 
 ```json
 {
@@ -180,19 +180,19 @@ Execute a device action. Resets the idle timeout timer.
 }
 ```
 
-Response:
+响应：
 ```json
 {"ok": true, "result": {}}
 ```
 
-Error (session expired):
+错误（会话已过期）：
 ```json
-{"ok": false, "error": "session_expired", "msg": "Session timed out after 300s idle"}
+{"ok": false, "error": "session_expired", "msg": "会话空闲 300 秒后已超时"}
 ```
 
 #### release
 
-Voluntarily release a device.
+主动释放设备。
 
 ```json
 {"cmd": "release", "args": {"session_id": "uuid-xxx"}}
@@ -200,7 +200,7 @@ Voluntarily release a device.
 
 #### heartbeat
 
-Keep session alive without performing an operation.
+保持会话活跃（不执行操作）。
 
 ```json
 {"cmd": "heartbeat", "args": {"session_id": "uuid-xxx"}}
@@ -208,13 +208,13 @@ Keep session alive without performing an operation.
 
 #### status
 
-Query daemon state.
+查询守护进程状态。
 
 ```json
 {"cmd": "status", "args": {}}
 ```
 
-Response:
+响应：
 ```json
 {
   "ok": true,
@@ -229,39 +229,39 @@ Response:
 
 #### list_devices
 
-Discover available devices.
+发现可用设备。
 
 ```json
 {"cmd": "list_devices", "args": {"device_type": "ios"}}
 ```
 
-## Device Manager
+## 设备管理器
 
-### Per-Platform Connection Strategy
+### 各平台连接策略
 
-**iOS:**
-- Allocate WDA port from 8100-8199.
-- Start `tidevice -u <udid> wdaproxy --port <allocated_port>` as subprocess.
-- Create `wda.Client(f"http://localhost:{allocated_port}")`.
-- On disconnect: terminate wdaproxy subprocess, release port.
+**iOS：**
+- 从 8100-8199 范围分配 WDA 端口。
+- 启动 `tidevice -u <udid> wdaproxy --port <分配的端口>` 子进程。
+- 创建 `wda.Client(f"http://localhost:{分配的端口}")`。
+- 断开时：终止 wdaproxy 子进程，释放端口。
 
-**ADB:**
-- Allocate ADB server port from 5037-5099.
-- Start isolated ADB server: `adb -P <allocated_port> start-server`.
-- All device commands go through: `adb -P <allocated_port> -s <device_id> ...`.
-- On disconnect: `adb -P <allocated_port> kill-server`, release port.
+**ADB：**
+- 从 5037-5099 范围分配 ADB server 端口。
+- 启动独立的 ADB server：`adb -P <分配的端口> start-server`。
+- 所有设备命令通过：`adb -P <分配的端口> -s <device_id> ...` 执行。
+- 断开时：`adb -P <分配的端口> kill-server`，释放端口。
 
-**HDC:**
-- Allocate HDC server port from 5100-5199.
-- Start isolated HDC server on allocated port.
-- All device commands go through the allocated server.
-- On disconnect: kill server, release port.
+**HDC：**
+- 从 5100-5199 范围分配 HDC server 端口。
+- 在分配的端口上启动独立的 HDC server。
+- 所有设备命令通过该 server 执行。
+- 断开时：终止 server，释放端口。
 
-## Client API
+## 客户端 API
 
 ```python
 class PhoneClient:
-    """Lightweight client for AI sessions to communicate with daemon."""
+    """AI 会话通过此客户端与守护进程通信。"""
 
     def __init__(self, socket_path="~/.phone-cli/phone-cli.sock"):
         self._socket_path = os.path.expanduser(socket_path)
@@ -269,175 +269,175 @@ class PhoneClient:
 
     def acquire(self, device_id: str, device_type: str = "auto",
                 timeout: float = 300, wait: bool = True) -> dict:
-        """Acquire a device. Stores session_id internally."""
+        """申请设备连接。成功后内部保存 session_id。"""
 
     def tap(self, x: int, y: int) -> dict:
-        """Tap at coordinates."""
+        """点击指定坐标。"""
 
     def swipe(self, x1, y1, x2, y2, duration=300) -> dict:
-        """Swipe gesture."""
+        """滑动手势。"""
 
     def screenshot(self, path: str | None = None) -> dict:
-        """Take screenshot."""
+        """截图。"""
 
     def release(self) -> None:
-        """Release device, clear session."""
+        """释放设备，清除会话。"""
 
     def heartbeat(self) -> None:
-        """Keep-alive without operation."""
+        """保持活跃（不执行操作）。"""
 ```
 
-All `tap`/`swipe`/`screenshot`/etc. methods call `_operate(action, **args)` internally, which sends the operate command and auto-refreshes the timeout.
+所有 `tap`/`swipe`/`screenshot` 等方法内部调用 `_operate(action, **args)`，每次操作自动刷新超时计时器。
 
-## Migration from Existing Architecture
+## 从现有架构迁移
 
-### What Changes
+### 变化项
 
-| Before | After |
-|--------|-------|
-| Per-device-type daemon instances (adb/hdc/ios) | Single global daemon |
-| `~/.phone-cli/instances/{adb,hdc,ios}/` | `~/.phone-cli/` (single home) |
-| Multiple pid/socket/state files | One pid, one socket, one state |
-| Device operations in CLI process | Device operations in daemon process |
-| No session concept | Explicit acquire/operate/release |
-| No timeout | Configurable idle timeout (default 300s) |
-| Hardcoded ports | Dynamic port allocation |
+| 迁移前 | 迁移后 |
+|--------|--------|
+| 按设备类型分实例的守护进程 (adb/hdc/ios) | 单一全局守护进程 |
+| `~/.phone-cli/instances/{adb,hdc,ios}/` | `~/.phone-cli/`（单一主目录） |
+| 多个 pid/socket/state 文件 | 一个 pid、一个 socket、一个 state |
+| 设备操作在 CLI 进程中执行 | 设备操作在守护进程中执行 |
+| 无会话概念 | 显式的 acquire/operate/release |
+| 无超时 | 可配置的空闲超时（默认 300 秒） |
+| 硬编码端口 | 动态端口分配 |
 
-### What Stays
+### 保留项
 
-- `phone_cli/adb/connection.py` — ADBConnection class, used by DeviceManager.
-- `phone_cli/hdc/connection.py` — HDCConnection class, used by DeviceManager.
-- `phone_cli/ios/connection.py` — WDAConnection class, used by DeviceManager.
-- CLI commands (`phone-cli start/stop/status`) — updated to talk to new daemon.
-- Unix socket IPC pattern — same mechanism, enhanced protocol.
+- `phone_cli/adb/connection.py` — ADBConnection 类，被 DeviceManager 内部使用。
+- `phone_cli/hdc/connection.py` — HDCConnection 类，被 DeviceManager 内部使用。
+- `phone_cli/ios/connection.py` — WDAConnection 类，被 DeviceManager 内部使用。
+- CLI 命令（`phone-cli start/stop/status`）— 更新为与新守护进程通信。
+- Unix socket IPC 模式 — 相同机制，增强协议。
 
-### Backward Compatibility
+### 向后兼容
 
-- Single AI session: acquires device, gets default port (8100/5037), behavior identical to before.
-- Existing CLI commands continue to work.
-- `phone-cli start --device-type ios` starts the global daemon and auto-acquires the specified device type.
+- 单 AI 会话：申请设备后获得默认端口（8100/5037），行为与之前完全一致。
+- 现有 CLI 命令继续工作。
+- `phone-cli start --device-type ios` 启动全局守护进程并自动申请指定设备类型。
 
-## Daemon Startup & Recovery
+## 守护进程启动与恢复
 
-### Startup Sequence
+### 启动流程
 
-1. Check PID file (`~/.phone-cli/phone-cli.pid`):
-   - PID exists and process alive → daemon already running, exit with error.
-   - PID exists but process dead → stale PID, clean up and continue.
-   - No PID file → fresh start.
-2. Clean stale socket: remove `phone-cli.sock` if it exists (leftover from crash).
-3. Scan for orphan subprocesses in known port ranges:
-   - Check ports 8100-8199 for orphan `tidevice wdaproxy` processes → kill them.
-   - Check ports 5037-5099 for orphan `adb` server processes → `adb -P <port> kill-server`.
-   - Check ports 5100-5199 for orphan `hdc` server processes → kill them.
-4. Write new PID file.
-5. Bind Unix socket, start accept loop.
+1. 检查 PID 文件（`~/.phone-cli/phone-cli.pid`）：
+   - PID 存在且进程存活 → 守护进程已在运行，报错退出。
+   - PID 存在但进程已死 → 残留 PID，清理后继续。
+   - 无 PID 文件 → 全新启动。
+2. 清理残留 socket：如果 `phone-cli.sock` 存在（崩溃遗留），删除之。
+3. 扫描已知端口范围内的孤儿子进程：
+   - 检查 8100-8199 端口的孤儿 `tidevice wdaproxy` 进程 → 终止。
+   - 检查 5037-5099 端口的孤儿 `adb` server 进程 → `adb -P <端口> kill-server`。
+   - 检查 5100-5199 端口的孤儿 `hdc` server 进程 → 终止。
+4. 写入新 PID 文件。
+5. 绑定 Unix socket，启动 accept 循环。
 
-### Shutdown (SIGTERM / `phone-cli stop`)
+### 关闭流程（SIGTERM / `phone-cli stop`）
 
-1. Stop accepting new connections.
-2. Expire all active sessions (no notification to clients; clients will get `connection_refused` on next attempt).
-3. Terminate all device subprocesses (wdaproxy, adb servers) with SIGTERM, wait 5s, SIGKILL if needed.
-4. Remove socket file and PID file.
+1. 停止接受新连接。
+2. 使所有活跃会话过期（不通知客户端；客户端下次操作时会收到 `connection_refused`）。
+3. 以 SIGTERM 终止所有设备子进程（wdaproxy、adb server），等待 5 秒，必要时 SIGKILL。
+4. 删除 socket 文件和 PID 文件。
 
-### Crash Recovery
+### 崩溃恢复
 
-If the daemon crashes (SIGKILL, OOM, etc.):
-- Stale socket and PID file remain on disk.
-- Orphan subprocesses (wdaproxy, adb servers) keep running, holding ports.
-- Next `phone-cli start` triggers the startup sequence above, which cleans everything up.
-- Clients get `connection_refused` and must re-acquire.
+如果守护进程崩溃（SIGKILL、OOM 等）：
+- 残留的 socket 和 PID 文件留在磁盘上。
+- 孤儿子进程（wdaproxy、adb server）继续运行，占用端口。
+- 下次 `phone-cli start` 触发上述启动流程，自动清理所有残留。
+- 客户端收到 `connection_refused`，需重新 acquire。
 
-## Concurrency Model
+## 并发模型
 
-The daemon uses a **threading model**:
+守护进程使用**多线程模型**：
 
-- **Main thread**: Unix socket accept loop.
-- **Worker threads**: One thread per client connection (short-lived, handles one request-response).
-- **Watchdog thread**: Periodic timeout scanning.
-- **Thread safety**: `SessionManager` and `DeviceManager` use a single `threading.Lock` each. All state mutations go through the lock. Device operations (subprocess calls) run outside the lock to avoid blocking other sessions.
+- **主线程**：Unix socket accept 循环。
+- **工作线程**：每个客户端连接一个线程（短生命周期，处理单次请求-响应）。
+- **Watchdog 线程**：定期超时扫描。
+- **线程安全**：`SessionManager` 和 `DeviceManager` 各持有一个 `threading.Lock`。所有状态变更通过锁保护。设备操作（子进程调用）在锁外执行，避免阻塞其他会话。
 
-Per-device serialization: `DeviceManager` holds a `threading.Lock` per `DeviceSlot`. Two operations on different devices run in parallel; two operations on the same device are serialized.
+每设备串行化：`DeviceManager` 为每个 `DeviceSlot` 持有一个 `threading.Lock`。不同设备的操作可并行执行；同一设备的操作串行化。
 
-## Device Access Model
+## 设备访问模型
 
-**Exclusive access**: Each device is held by at most one active session at a time. This is intentional — concurrent operations on the same device (tap + screenshot) produce unpredictable results. Read-only operations (list_devices, status) do not require a session.
+**独占访问**：每个设备同一时刻最多被一个活跃会话持有。这是有意设计的——同一设备上的并发操作（点击 + 截图）会产生不可预期的结果。只读操作（list_devices、status）不需要会话。
 
-## Queue Activation
+## 排队激活机制
 
-When a session is queued (device busy), the `acquire` call **blocks**:
+当会话被排队（设备被占）时，`acquire` 调用**阻塞等待**：
 
-1. Client sends `acquire` request.
-2. Daemon sees device busy → creates session with status `queued`, adds to `DeviceSlot.wait_queue`.
-3. Daemon **holds the socket connection open** (does not send a response yet).
-4. When the current session releases/expires → daemon pops next from `wait_queue`, activates it, sends the `acquire` response with `"status": "active"` over the held connection.
-5. Client-side timeout: if the client doesn't want to wait forever, it can set a socket timeout. On timeout, daemon detects the closed connection and removes the queued session.
+1. 客户端发送 `acquire` 请求。
+2. 守护进程发现设备被占 → 创建状态为 `queued` 的会话，加入 `DeviceSlot.wait_queue`。
+3. 守护进程**保持 socket 连接不关闭**（暂不发送响应）。
+4. 当前会话释放/过期时 → 守护进程从 `wait_queue` 弹出下一个，激活它，通过保持的连接发送 `acquire` 响应（`"status": "active"`）。
+5. 客户端超时：如果客户端不想无限等待，可设置 socket 超时。超时后守护进程检测到连接关闭，移除排队会话。
 
-This avoids polling and keeps the client API simple (`acquire` returns only when the device is ready).
+这种设计避免了轮询，保持客户端 API 简洁（`acquire` 仅在设备就绪时返回）。
 
-## DeviceSlot (updated)
+## DeviceSlot（更新版）
 
 ```python
 @dataclass
 class DeviceSlot:
     device_id: str
     device_type: str                    # "ios" | "adb" | "hdc"
-    port: int                           # Allocated port
+    port: int                           # 分配的端口
     current_session_id: str | None
-    wait_queue: list[str]               # Queued session_ids, FIFO order
-    process: subprocess.Popen | None    # wdaproxy / adb server subprocess
-    lock: threading.Lock                # Per-device operation lock
+    wait_queue: list[str]               # 排队的 session_id 列表，FIFO 顺序
+    process: subprocess.Popen | None    # wdaproxy / adb server 子进程
+    lock: threading.Lock                # 每设备操作锁
     connected_at: float
 ```
 
-## Port Allocation TOCTOU Mitigation
+## 端口分配 TOCTOU 缓解
 
-The bind-check has a TOCTOU window: between closing the test socket and starting the real service, an external process could grab the port. Mitigation:
+bind 检测存在 TOCTOU 窗口：在关闭测试 socket 和启动实际服务之间，外部进程可能抢占该端口。缓解措施：
 
-- If the service (wdaproxy, adb server) fails to start on the allocated port, catch the error, mark the port as unavailable, and retry with the next port in range.
-- Retry up to 3 times before raising `PortExhaustedError`.
-- In practice, the window is milliseconds and collisions are rare.
+- 如果服务（wdaproxy、adb server）无法在分配的端口上启动，捕获错误，标记该端口不可用，使用范围内下一个端口重试。
+- 最多重试 3 次，之后抛出 `PortExhaustedError`。
+- 实际上，窗口期仅有毫秒级，冲突极为罕见。
 
-## Device Health Monitoring
+## 设备健康监控
 
-The watchdog thread also monitors device connectivity:
+Watchdog 线程同时监控设备连接状态：
 
-- Every `HEARTBEAT_INTERVAL` (30s), check if the device subprocess (wdaproxy, adb server) is still alive.
-- If subprocess has exited unexpectedly:
-  - Mark the active session as `"error"` state.
-  - Next `operate` call returns `{"ok": false, "error": "device_disconnected", "msg": "..."}`.
-  - Client can `release` and re-`acquire` to retry.
-- Physical device disconnect (USB unplug) is detected via subprocess exit (wdaproxy exits when device disappears) or via platform-specific checks (adb devices, tidevice list).
+- 每隔 `HEARTBEAT_INTERVAL`（30 秒），检查设备子进程（wdaproxy、adb server）是否存活。
+- 如果子进程意外退出：
+  - 将活跃会话标记为 `"error"` 状态。
+  - 下次 `operate` 调用返回 `{"ok": false, "error": "device_disconnected", "msg": "..."}`。
+  - 客户端可 `release` 后重新 `acquire` 来重试。
+- 物理设备断开（USB 拔出）通过子进程退出检测（wdaproxy 在设备消失时退出）或平台特定检查（adb devices、tidevice list）发现。
 
-## Error Taxonomy
+## 错误分类
 
-| Error Code | When | HTTP-like |
-|---|---|---|
-| `session_not_found` | Unknown or already-released session_id | 404 |
-| `session_expired` | Session timed out | 410 |
-| `device_not_found` | Device ID not found in discovery | 404 |
-| `device_busy` | Device held by another session (only if non-blocking acquire is added later) | 409 |
-| `device_disconnected` | Device lost during session | 503 |
-| `port_exhausted` | All ports in range occupied | 503 |
-| `operation_failed` | Device command returned error | 500 |
-| `invalid_request` | Malformed JSON or missing fields | 400 |
-| `daemon_shutting_down` | Daemon received SIGTERM | 503 |
+| 错误码 | 触发条件 | HTTP 类比 |
+|--------|----------|-----------|
+| `session_not_found` | 未知或已释放的 session_id | 404 |
+| `session_expired` | 会话超时过期 | 410 |
+| `device_not_found` | 设备 ID 在发现列表中不存在 | 404 |
+| `device_busy` | 设备被其他会话持有（仅在非阻塞 acquire 中使用） | 409 |
+| `device_disconnected` | 会话期间设备丢失 | 503 |
+| `port_exhausted` | 范围内所有端口均被占用 | 503 |
+| `operation_failed` | 设备命令返回错误 | 500 |
+| `invalid_request` | JSON 格式错误或缺少必需字段 | 400 |
+| `daemon_shutting_down` | 守护进程收到 SIGTERM | 503 |
 
-## Auto-Detection (`device_type: "auto"`)
+## 自动检测（`device_type: "auto"`）
 
-When `device_type` is `"auto"`, the daemon resolves it:
+当 `device_type` 为 `"auto"` 时，守护进程自动解析：
 
-1. If `device_id` matches a known ADB device (`adb devices`) → `"adb"`.
-2. If `device_id` matches a known HDC device (`hdc list targets`) → `"hdc"`.
-3. If `device_id` matches a known iOS device (`tidevice list`) → `"ios"`.
-4. If no match → return `{"ok": false, "error": "device_not_found"}`.
+1. 如果 `device_id` 匹配已知 ADB 设备（`adb devices`）→ `"adb"`。
+2. 如果 `device_id` 匹配已知 HDC 设备（`hdc list targets`）→ `"hdc"`。
+3. 如果 `device_id` 匹配已知 iOS 设备（`tidevice list`）→ `"ios"`。
+4. 均不匹配 → 返回 `{"ok": false, "error": "device_not_found"}`。
 
-Discovery is cached for 10 seconds to avoid repeated subprocess calls.
+发现结果缓存 10 秒，避免重复调用子进程。
 
-## Testing Strategy
+## 测试策略
 
-- Unit tests for SessionManager: acquire/release/expire state transitions, queue ordering.
-- Unit tests for port allocation: range scanning, bind-check mocking, exhaustion.
-- Unit tests for TimeoutWatchdog: expiry detection, queue activation.
-- Integration tests for IPC: client-daemon round-trip via real Unix socket.
-- E2E tests (with devices): full acquire-operate-release cycle.
+- SessionManager 单元测试：acquire/release/expire 状态转换，队列排序。
+- 端口分配单元测试：范围扫描、bind 检测 mock、端口耗尽。
+- TimeoutWatchdog 单元测试：超时检测，队列激活。
+- IPC 集成测试：通过真实 Unix socket 的客户端-守护进程往返通信。
+- E2E 测试（需连接设备）：完整的 acquire-operate-release 流程。
