@@ -145,6 +145,20 @@ phone-cli --instance ios device-info
 4. If multiple targets exist, ask the user which one to use
 5. After selecting a target, always run `phone-cli set-device <ID>`
 
+## Step 1.8: Companion Accessibility Service Setup (Android Only)
+
+After Android daemon startup and target selection, set up the Companion service for enhanced UI access:
+
+1. Run `phone-cli companion-status` to check current state
+2. If `service_ready: true` → the companion is already active, proceed to Step 2
+3. If not ready → run `phone-cli companion-setup`
+   - This command automatically: detects APK → builds from source if needed → installs → enables accessibility → sets up port forwarding
+   - First-time build requires Android SDK + Java 17 and takes ~1-2 minutes
+4. If auto-enable fails (some OEM ROMs like Xiaomi/OPPO/Vivo block programmatic enable):
+   - Guide the user to manually enable: Settings > Accessibility > Select to Speak > ON
+   - Then rerun `phone-cli companion-setup` to complete port forwarding
+5. **Companion failure does NOT block the workflow** → fall back to uiautomator (the existing flow continues to work)
+
 ### iOS
 
 1. If the daemon was just started from `detect-runtimes`, the selected runtime/target is already bound
@@ -233,16 +247,33 @@ Execute `phone-cli` commands directly in main session via Bash:
 # Example: observe screen state via UI node tree (preferred)
 phone-cli ui-tree
 # Parse node text/bounds to understand current screen and locate elements
+# If source=companion, you also get nodeId, clickable, scrollable, editable fields
+
+# Companion available (source=companion) — use semantic operations:
+phone-cli screen-context              # Quick interactive elements summary
+phone-cli find-nodes --text "登录"     # Search by text
+phone-cli find-nodes --clickable       # Find all clickable elements
+phone-cli click-node "0.3.1"          # Click by nodeId (from ui-tree or find-nodes)
+phone-cli click-node "0.3.1" --fallback-x 200 --fallback-y 230  # With coordinate fallback
+
+# Companion unavailable (source=uiautomator) or non-Android — use coordinates:
+phone-cli tap 500 300
 
 # Example: take a screenshot (only when visual verification needed)
 phone-cli screenshot --resize 720
 # Read the screenshot file path from JSON output, then use Read tool to view it
-
-# Example: tap at position
-phone-cli tap 500 300
 ```
 
-**Observation priority:** Always use `phone-cli ui-tree` first, then evaluate node quality:
+**Observation priority:** Always use `phone-cli ui-tree` first, then evaluate the response:
+
+**Android observation priority chain:**
+1. **Companion UI tree** (ui-tree returns `source: "companion"`) → richest data with nodeId, clickable, scrollable, editable
+   - Use `phone-cli find-nodes` / `phone-cli click-node` / `phone-cli screen-context` for semantic operations
+2. **uiautomator dump** (ui-tree returns `source: "uiautomator"`) → basic text/resource_id/class/bounds
+   - Use coordinate-based tap/swipe
+3. **Screenshot** → final fallback, or when visual verification is needed
+
+**Node quality evaluation:**
 - **Nodes usable** (≥15% have text or meaningful resource_id): use ui-tree for positioning and verification
 - **Nodes unusable** (<15% useful, typical of Flutter/game/WebView/Canvas): fall back to screenshots
 - **Simulator UI tree unavailable** (`UI_TREE_UNAVAILABLE`): this is expected in MVP, fall back to screenshots
@@ -355,6 +386,11 @@ After execution:
 | `phone-cli app-log` | App logs via logcat | Android-only |
 | `phone-cli install APK` | Install APK | Android-only |
 | `phone-cli version` | Show version | |
+| `phone-cli companion-status` | Companion service status | Android-only; shows installed/enabled/ready |
+| `phone-cli companion-setup` | Build+install+enable companion | Android-only; first run needs SDK+Java 17 |
+| `phone-cli find-nodes` | Search UI nodes | `--text`, `--text-contains`, `--resource-id`, `--class-name`, `--clickable` |
+| `phone-cli click-node NODEID` | Click by nodeId | `--fallback-x`, `--fallback-y` coordinate fallback |
+| `phone-cli screen-context` | Interactive elements summary | Android-only; needs companion |
 
 ## ADB Diagnostic Command Reference
 
@@ -371,3 +407,14 @@ These commands help diagnose issues beyond what phone-cli provides:
 | `aapt2 dump badging <apk>` | Get APK package name and launcher activity |
 | `adb shell getprop sys.boot_completed` | Check if device has finished booting |
 | `lsof -i :5037` | Find process using ADB port |
+
+## Companion Troubleshooting (Android)
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `companion-setup` build fails | Missing Android SDK or Java 17 | Install SDK, set `ANDROID_HOME`; install Java 17, set `JAVA_HOME` |
+| `companion-setup` install fails | Storage full or ADB permission denied | Clear device storage, retry |
+| Accessibility auto-enable fails | OEM security restrictions (Xiaomi/OPPO/Vivo) | Manually enable: Settings > Accessibility > Select to Speak > ON |
+| Companion port forwarding lost | Device reconnected or ADB restarted | Run `phone-cli companion-setup` to re-establish |
+| `ui-tree` returns `source: uiautomator` despite companion installed | Service not running or port forwarding lost | Run `phone-cli companion-status`, then `companion-setup` if needed |
+| `find-nodes` / `click-node` returns `COMPANION_UNAVAILABLE` | Companion service not reachable | Check `companion-status`, re-run `companion-setup` |

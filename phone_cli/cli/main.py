@@ -358,5 +358,66 @@ def install(apk_path, launch):
     }))
 
 
+# ── Companion commands (Android-only) ────────────────────────────────
+
+@cli.command(name="companion-status")
+def companion_status():
+    """Check companion accessibility service status (Android-only)."""
+    daemon = _get_daemon()
+    _print_json(daemon.send_command("companion_status"))
+
+
+@cli.command(name="companion-setup")
+def companion_setup():
+    """Build, install, enable, and set up companion service (Android-only)."""
+    daemon = _get_daemon()
+    _print_json(daemon.send_command("companion_setup"))
+
+
+@cli.command(name="find-nodes")
+@click.option("--text", default=None, help="Exact text match")
+@click.option("--text-contains", default=None, help="Partial text match")
+@click.option("--resource-id", default=None, help="Resource ID match")
+@click.option("--class-name", default=None, help="Class name match")
+@click.option("--clickable", is_flag=True, default=None, help="Only clickable nodes")
+def find_nodes(text, text_contains, resource_id, class_name, clickable):
+    """Search UI nodes by criteria via companion (Android-only)."""
+    daemon = _get_daemon()
+    args = {}
+    if text is not None:
+        args["text"] = text
+    if text_contains is not None:
+        args["text_contains"] = text_contains
+    if resource_id is not None:
+        args["resource_id"] = resource_id
+    if class_name is not None:
+        args["class_name"] = class_name
+    if clickable:
+        args["clickable"] = True
+    _print_json(daemon.send_command("find_nodes", args))
+
+
+@cli.command(name="click-node")
+@click.argument("node_id")
+@click.option("--fallback-x", default=None, type=int, help="Fallback X coordinate")
+@click.option("--fallback-y", default=None, type=int, help="Fallback Y coordinate")
+def click_node(node_id, fallback_x, fallback_y):
+    """Click a UI node by nodeId (Android-only)."""
+    daemon = _get_daemon()
+    args = {"node_id": node_id}
+    if fallback_x is not None:
+        args["fallback_x"] = fallback_x
+    if fallback_y is not None:
+        args["fallback_y"] = fallback_y
+    _print_json(daemon.send_command("click_node", args))
+
+
+@cli.command(name="screen-context")
+def screen_context():
+    """Get interactive elements summary via companion (Android-only)."""
+    daemon = _get_daemon()
+    _print_json(daemon.send_command("screen_context"))
+
+
 if __name__ == "__main__":
     cli()

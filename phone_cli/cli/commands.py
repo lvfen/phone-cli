@@ -408,6 +408,18 @@ def _cmd_type(args: dict, daemon: Any) -> str:
     device_type = _get_device_type(daemon)
 
     if device_type == "adb":
+        # Try companion set_text first (faster, no keyboard switching)
+        try:
+            from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+            client = CompanionClient()
+            if client.is_ready():
+                result = client.set_text(text)
+                if result.get("success"):
+                    return ok_response({"typed": text, "source": "companion"})
+        except (CompanionUnavailableError, OSError, ValueError, KeyError):
+            pass  # Fall through to ADB keyboard
+
+        # Fall back to ADB keyboard flow
         from phone_cli import adb
         original_ime = adb.detect_and_set_adb_keyboard(device_id=device_id)
         try:
@@ -530,7 +542,20 @@ def _cmd_ui_tree(args: dict, daemon: Any) -> str:
 
 
 def _ui_tree_adb(device_id: str | None) -> str:
-    """Dump UI tree via ADB uiautomator."""
+    """Dump UI tree via Companion (preferred) or ADB uiautomator (fallback)."""
+
+    # 1. Try companion service first
+    try:
+        from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+        client = CompanionClient()
+        if client.is_ready():
+            tree = client.get_ui_tree()
+            elements = _normalize_companion_tree(tree)
+            return ok_response({"elements": elements, "source": "companion"})
+    except (CompanionUnavailableError, OSError, ValueError, KeyError):
+        pass  # Fall through to uiautomator
+
+    # 2. Fall back to uiautomator dump
     adb_prefix = ["adb"]
     if device_id:
         adb_prefix = ["adb", "-s", device_id]
@@ -553,9 +578,75 @@ def _ui_tree_adb(device_id: str | None) -> str:
     # Parse XML to JSON elements
     try:
         elements = _parse_ui_xml(result.stdout)
-        return ok_response({"elements": elements})
+        return ok_response({"elements": elements, "source": "uiautomator"})
     except Exception as e:
         return error_response(ErrorCode.UI_TREE_UNAVAILABLE, f"XML parse error: {e}")
+
+
+def _normalize_companion_tree(tree: dict) -> list[dict]:
+    """Flatten the companion hierarchical UiNode tree into a list of element dicts.
+
+    The output format is compatible with _parse_ui_xml but includes additional
+    companion-specific fields (node_id, content_description, clickable, etc.).
+    """
+    elements: list[dict] = []
+
+    def _flatten(node: dict) -> None:
+        bounds = node.get("bounds")
+        bounds_str = ""
+        center_x = None
+        center_y = None
+        if bounds:
+            left = bounds.get("left", 0)
+            top = bounds.get("top", 0)
+            right = bounds.get("right", 0)
+            bottom = bounds.get("bottom", 0)
+            bounds_str = f"[{left},{top}][{right},{bottom}]"
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+
+        center = node.get("center")
+        if center:
+            center_x = center.get("x", center_x)
+            center_y = center.get("y", center_y)
+
+        elem = {
+            "text": node.get("text", ""),
+            "resource_id": node.get("resourceId", ""),
+            "class": node.get("className", ""),
+            "bounds": bounds_str,
+            # Companion-enhanced fields
+            "node_id": node.get("nodeId", ""),
+            "content_description": node.get("contentDescription", ""),
+            "clickable": node.get("clickable", False),
+            "scrollable": node.get("scrollable", False),
+            "editable": node.get("editable", False),
+        }
+        if center_x is not None:
+            elem["center_x"] = center_x
+        if center_y is not None:
+            elem["center_y"] = center_y
+
+        # Only include nodes that have some identifying info
+        has_info = (
+            elem["text"]
+            or elem["resource_id"]
+            or elem["content_description"]
+            or elem["clickable"]
+            or elem["scrollable"]
+            or elem["editable"]
+        )
+        if has_info:
+            elements.append(elem)
+
+        for child in node.get("children", []):
+            _flatten(child)
+
+    root = tree.get("root")
+    if root:
+        _flatten(root)
+
+    return elements
 
 
 def _parse_ui_xml(xml_str: str) -> list[dict]:
@@ -794,7 +885,7 @@ def _cmd_app_log(args: dict, daemon: Any) -> str:
             ErrorCode.COMMAND_FAILED,
             f"app_log is only supported for ADB devices, current: {device_type}",
         )
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     from phone_cli.adb.device import get_app_log
     package = args.get("package")
     filter_type = args.get("filter", "all")
@@ -815,7 +906,7 @@ def _cmd_install(args: dict, daemon: Any) -> str:
             ErrorCode.COMMAND_FAILED,
             f"install is only supported for ADB devices, current: {device_type}",
         )
-    device_id = _get_device_id(args, daemon)
+    device_id = _get_target_id(args, daemon)
     apk_path = args.get("apk_path")
     if not apk_path:
         return error_response(ErrorCode.COMMAND_FAILED, "apk_path is required")
@@ -828,3 +919,112 @@ def _cmd_install(args: dict, daemon: Any) -> str:
         return error_response(ErrorCode.INSTALL_FAILED, str(e))
     except RuntimeError as e:
         return error_response(ErrorCode.INSTALL_FAILED, str(e))
+
+
+# ── Companion commands (Android-only) ────────────────────────────────
+
+@_register("companion_status")
+def _cmd_companion_status(args: dict, daemon: Any) -> str:
+    """Check companion installation, accessibility, and readiness status."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "companion_status is only supported for Android (ADB) devices",
+        )
+    device_id = _get_target_id(args, daemon)
+    from phone_cli.adb.companion_manager import CompanionManager
+    manager = CompanionManager(device_id=device_id)
+    status = manager.get_status()
+    return ok_response(status)
+
+
+@_register("companion_setup")
+def _cmd_companion_setup(args: dict, daemon: Any) -> str:
+    """Build (if needed), install, enable accessibility, and set up port forwarding."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "companion_setup is only supported for Android (ADB) devices",
+        )
+    device_id = _get_target_id(args, daemon)
+    from phone_cli.adb.companion_manager import CompanionManager
+    manager = CompanionManager(device_id=device_id)
+    try:
+        result = manager.ensure_ready()
+        if result.get("available"):
+            # Write companion status to daemon state
+            state = _get_state(daemon)
+            state["companion_status"] = "ready"
+            daemon._write_state(state)
+        return ok_response(result)
+    except (FileNotFoundError, EnvironmentError, RuntimeError, subprocess.TimeoutExpired) as e:
+        return error_response(ErrorCode.COMPANION_BUILD_FAILED, str(e))
+
+
+@_register("find_nodes")
+def _cmd_find_nodes(args: dict, daemon: Any) -> str:
+    """Search UI nodes by criteria via companion service."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "find_nodes is only supported for Android (ADB) devices",
+        )
+    from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+    try:
+        client = CompanionClient()
+        result = client.find_nodes(
+            text=args.get("text"),
+            text_contains=args.get("text_contains"),
+            resource_id=args.get("resource_id"),
+            class_name=args.get("class_name"),
+            clickable=args.get("clickable"),
+        )
+        return ok_response(result)
+    except CompanionUnavailableError as e:
+        return error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))
+
+
+@_register("click_node")
+def _cmd_click_node(args: dict, daemon: Any) -> str:
+    """Click a UI node by nodeId with optional coordinate fallback."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "click_node is only supported for Android (ADB) devices",
+        )
+    node_id = args.get("node_id")
+    if not node_id:
+        return error_response(ErrorCode.COMMAND_FAILED, "node_id is required")
+    from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+    try:
+        client = CompanionClient()
+        result = client.click_node(
+            node_id=node_id,
+            fallback_x=args.get("fallback_x"),
+            fallback_y=args.get("fallback_y"),
+        )
+        return ok_response(result)
+    except CompanionUnavailableError as e:
+        return error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))
+
+
+@_register("screen_context")
+def _cmd_screen_context(args: dict, daemon: Any) -> str:
+    """Get interactive elements summary from companion service."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "screen_context is only supported for Android (ADB) devices",
+        )
+    from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+    try:
+        client = CompanionClient()
+        result = client.get_screen_context()
+        return ok_response(result)
+    except CompanionUnavailableError as e:
+        return error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))

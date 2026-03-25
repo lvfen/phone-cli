@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Android 控制助手</string>
+    <string name="service_name">Select to Speak</string>
+    <string name="service_description">为 GameHelper 控制 MCP 提供无障碍快照和节点操作能力。</string>
+    <string name="main_instructions">请依次开启无障碍服务、常驻通知和电池优化白名单，确保后台稳定运行。</string>
+
+    <string name="action_open_accessibility_settings">打开无障碍设置</string>
+    <string name="action_refresh_status">刷新状态</string>
+    <string name="action_start_keepalive">开启常驻通知</string>
+    <string name="action_stop_keepalive">关闭常驻通知</string>
+    <string name="action_request_battery_optimization_whitelist">申请忽略电池优化</string>
+    <string name="action_open_battery_optimization_settings">打开电池优化设置</string>
+    <string name="action_open_rom_keepalive_guide">查看 ROM 保活指南</string>
+
+    <string name="message_cannot_open_battery_optimization_request">无法打开电池优化请求页面。</string>
+    <string name="message_cannot_open_battery_optimization_settings">无法打开电池优化设置。</string>
+    <string name="message_notification_permission_denied">通知权限被拒绝，常驻通知未启动。</string>
+
+    <string name="keepalive_notification_channel_name">保活通知</string>
+    <string name="keepalive_notification_channel_description">显示无障碍桥接状态，保持进程前台可见。</string>
+    <string name="keepalive_notification_title">控制助手运行中</string>
+    <string name="keepalive_stop_action">停止</string>
+
+    <string name="rom_keepalive_dialog_title">ROM 保活清单</string>
+    <string name="rom_keepalive_dialog_message">针对 MIUI 等国产 ROM，请执行以下操作：\n\n1. 在最近任务中锁定本应用\n2. 允许自启动权限\n3. 取消电池节能限制\n4. 如系统支持，锁定通知栏通知</string>
+
+    <!-- 诊断状态文案 -->
+    <string name="status_summary">概览：%s</string>
+    <string name="status_accessibility">无障碍：全局=%s，服务=%s</string>
+    <string name="status_service_connected">服务连接：%s</string>
+    <string name="status_keepalive">常驻通知：%s</string>
+    <string name="status_battery">电池优化白名单：%s</string>
+    <string name="status_ports">本地端口：17342=%s，17343=%s</string>
+    <string name="status_capture">最近抓取：%1$s  |  当前包名：%2$s</string>
+    <string name="yes">是</string>
+    <string name="no">否</string>
+    <string name="none">无</string>
+    <string name="unknown">未知</string>
+
+    <!-- ServiceHealthMonitor 诊断消息 -->
+    <string name="issue_accessibility_disabled">请先打开系统无障碍总开关。</string>
+    <string name="issue_service_disabled">请启用 Select to Speak 无障碍服务。</string>
+    <string name="issue_service_disconnected">无障碍服务未连接，请重新启用。</string>
+    <string name="issue_bridge_down">本地桥接异常，请重启辅助服务。</string>
+    <string name="issue_keepalive_incomplete">保活配置未完成。</string>
+    <string name="issue_ready">助手就绪。</string>
+
+    <!-- 通知状态文案 -->
+    <string name="notif_connected">已连接：%s</string>
+    <string name="notif_keepalive_incomplete">保活配置未完成</string>
+    <string name="notif_detail">%1$s  最近抓取：%2$s</string>
+    <string name="notif_no_snapshot">暂无快照</string>
+    <string name="notif_keepalive_line">常驻通知：%1$s，电池优化：%2$s</string>
+    <string name="notif_on">已开启</string>
+    <string name="notif_off">已关闭</string>
+    <string name="notif_granted">已豁免</string>
+    <string name="notif_missing">未豁免</string>
+</resources>

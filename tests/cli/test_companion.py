@@ -1,0 +1,869 @@
+"""Tests for Android Companion integration."""
+
+import json
+from unittest.mock import MagicMock, patch, PropertyMock
+
+from phone_cli.cli.commands import dispatch_command
+from phone_cli.cli.output import ErrorCode
+
+
+# ── CompanionClient tests ────────────────────────────────────────────
+
+class TestCompanionClient:
+    """Tests for the CompanionClient HTTP client."""
+
+    def test_is_ready_returns_true_when_service_ready(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(CompanionClient, "get_status", return_value={"ready": True}):
+            client = CompanionClient()
+            assert client.is_ready() is True
+
+    def test_is_ready_returns_false_when_service_not_ready(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient, "get_status", return_value={"ready": False}
+        ):
+            client = CompanionClient()
+            assert client.is_ready() is False
+
+    def test_is_ready_returns_false_on_connection_error(self):
+        from phone_cli.adb.companion import (
+            CompanionClient,
+            CompanionUnavailableError,
+        )
+
+        with patch.object(
+            CompanionClient,
+            "get_status",
+            side_effect=CompanionUnavailableError("connection refused"),
+        ):
+            client = CompanionClient()
+            assert client.is_ready() is False
+
+    def test_find_nodes_builds_correct_query(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"totalMatches": 1, "nodes": [{"nodeId": "0.1"}]},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.find_nodes(text="登录", clickable=True)
+            mock_post.assert_called_once_with(
+                "/nodes/search",
+                body={"text": "登录", "clickable": True},
+            )
+            assert result["totalMatches"] == 1
+
+    def test_click_node_with_fallback(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True, "source": "companion"},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.click_node("0.3.1", fallback_x=200, fallback_y=300)
+            mock_post.assert_called_once_with(
+                "/actions/click-node",
+                body={
+                    "nodeId": "0.3.1",
+                    "fallbackBounds": {"centerX": 200, "centerY": 300},
+                },
+            )
+            assert result["success"] is True
+
+    def test_set_text_with_node_id(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.set_text("hello", node_id="0.2.1")
+            mock_post.assert_called_once_with(
+                "/actions/set-text",
+                body={"text": "hello", "nodeId": "0.2.1"},
+            )
+            assert result["success"] is True
+
+    def test_set_text_without_node_id(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.set_text("hello")
+            mock_post.assert_called_once_with(
+                "/actions/set-text",
+                body={"text": "hello"},
+            )
+
+    def test_tap(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True, "source": "companion"},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.tap(100, 200)
+            mock_post.assert_called_once_with(
+                "/actions/tap",
+                body={"x": 100, "y": 200},
+            )
+
+    def test_swipe(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True, "source": "companion"},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.swipe(100, 200, 300, 400, duration_ms=500)
+            mock_post.assert_called_once_with(
+                "/actions/swipe",
+                body={
+                    "startX": 100,
+                    "startY": 200,
+                    "endX": 300,
+                    "endY": 400,
+                    "durationMs": 500,
+                },
+            )
+
+    def test_get_screen_context(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        context = {
+            "packageName": "com.example",
+            "clickableNodes": [{"text": "OK"}],
+            "editableNodes": [],
+        }
+        with patch.object(
+            CompanionClient, "_get", return_value=context
+        ) as mock_get:
+            client = CompanionClient()
+            result = client.get_screen_context()
+            mock_get.assert_called_once_with("/screen/context")
+            assert result["packageName"] == "com.example"
+
+
+# ── CompanionManager tests ───────────────────────────────────────────
+
+class TestCompanionManager:
+    """Tests for the CompanionManager lifecycle manager."""
+
+    def test_is_installed_true(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="test123")
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(
+                stdout="package:com.gamehelper.androidcontrol\npackage:com.other"
+            ),
+        ):
+            assert mgr.is_installed() is True
+
+    def test_is_installed_false(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="test123")
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(stdout="package:com.other.app"),
+        ):
+            assert mgr.is_installed() is False
+
+    def test_is_accessibility_enabled_true(self):
+        from phone_cli.adb.companion_manager import CompanionManager, COMPANION_SERVICE
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(stdout=COMPANION_SERVICE),
+        ):
+            assert mgr.is_accessibility_enabled() is True
+
+    def test_is_accessibility_enabled_false(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr, "_run_adb", return_value=MagicMock(stdout="null")
+        ):
+            assert mgr.is_accessibility_enabled() is False
+
+    def test_is_port_forwarded_true(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(
+                stdout="abc123 tcp:17342 tcp:17342\nabc123 tcp:17343 tcp:17343"
+            ),
+        ):
+            assert mgr.is_port_forwarded() is True
+
+    def test_is_port_forwarded_false(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr, "_run_adb", return_value=MagicMock(stdout="")
+        ):
+            assert mgr.is_port_forwarded() is False
+
+    def test_get_installed_version(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(stdout="    versionName=1.2.3\n    versionCode=10"),
+        ):
+            assert mgr.get_installed_version() == "1.2.3"
+
+    def test_get_status_full(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "get_installed_version", return_value="1.0.0"), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(
+                 mgr._client,
+                 "get_status",
+                 return_value={"ready": True, "serviceConnected": True},
+             ):
+            status = mgr.get_status()
+            assert status["installed"] is True
+            assert status["version"] == "1.0.0"
+            assert status["accessibility_enabled"] is True
+            assert status["port_forwarded"] is True
+            assert status["service_ready"] is True
+
+    def test_adb_prefix_with_device_id(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="abc123")
+        assert mgr._adb() == ["adb", "-s", "abc123"]
+
+    def test_adb_prefix_without_device_id(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        assert mgr._adb() == ["adb"]
+
+
+# ── Command dispatch tests for companion commands ────────────────────
+
+class TestCompanionCommands:
+    """Tests for the companion command handlers via dispatch_command."""
+
+    def _make_adb_daemon(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+        return daemon
+
+    def _make_ios_daemon(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "ios"}
+        return daemon
+
+    def test_companion_status_adb(self):
+        daemon = self._make_adb_daemon()
+        with patch(
+            "phone_cli.adb.companion_manager.CompanionManager"
+        ) as MockMgr:
+            MockMgr.return_value.get_status.return_value = {
+                "installed": True,
+                "service_ready": True,
+            }
+            result = dispatch_command("companion_status", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["installed"] is True
+
+    def test_companion_status_ios_rejected(self):
+        daemon = self._make_ios_daemon()
+        result = dispatch_command("companion_status", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.UNSUPPORTED_OPERATION
+
+    def test_companion_setup_adb(self):
+        daemon = self._make_adb_daemon()
+        with patch(
+            "phone_cli.adb.companion_manager.CompanionManager"
+        ) as MockMgr:
+            MockMgr.return_value.ensure_ready.return_value = {
+                "available": True,
+                "steps": [],
+            }
+            result = dispatch_command("companion_setup", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["available"] is True
+        # Should have written companion_status to state
+        daemon._write_state.assert_called()
+
+    def test_companion_setup_ios_rejected(self):
+        daemon = self._make_ios_daemon()
+        result = dispatch_command("companion_setup", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.UNSUPPORTED_OPERATION
+
+    def test_find_nodes_success(self):
+        daemon = self._make_adb_daemon()
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            MockClient.return_value.find_nodes.return_value = {
+                "totalMatches": 2,
+                "nodes": [{"nodeId": "0.1"}, {"nodeId": "0.2"}],
+            }
+            result = dispatch_command(
+                "find_nodes", {"text": "登录", "clickable": True}, daemon
+            )
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["totalMatches"] == 2
+
+    def test_find_nodes_companion_unavailable(self):
+        daemon = self._make_adb_daemon()
+        from phone_cli.adb.companion import CompanionUnavailableError
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            MockClient.return_value.find_nodes.side_effect = (
+                CompanionUnavailableError("not reachable")
+            )
+            result = dispatch_command("find_nodes", {"text": "test"}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.COMPANION_UNAVAILABLE
+
+    def test_click_node_success(self):
+        daemon = self._make_adb_daemon()
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            MockClient.return_value.click_node.return_value = {
+                "success": True,
+                "source": "companion",
+            }
+            result = dispatch_command(
+                "click_node",
+                {"node_id": "0.3.1", "fallback_x": 200, "fallback_y": 300},
+                daemon,
+            )
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["success"] is True
+
+    def test_click_node_missing_id(self):
+        daemon = self._make_adb_daemon()
+        result = dispatch_command("click_node", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.COMMAND_FAILED
+
+    def test_screen_context_success(self):
+        daemon = self._make_adb_daemon()
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            MockClient.return_value.get_screen_context.return_value = {
+                "packageName": "com.example",
+                "clickableNodes": [{"text": "OK"}],
+                "editableNodes": [],
+            }
+            result = dispatch_command("screen_context", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["packageName"] == "com.example"
+
+    def test_screen_context_ios_rejected(self):
+        daemon = self._make_ios_daemon()
+        result = dispatch_command("screen_context", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.UNSUPPORTED_OPERATION
+
+
+# ── UI tree routing tests ────────────────────────────────────────────
+
+class TestUiTreeRouting:
+    """Tests for the companion-first UI tree routing."""
+
+    def test_ui_tree_adb_uses_companion_when_ready(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.is_ready.return_value = True
+            mock_instance.get_ui_tree.return_value = {
+                "capturedAt": "2024-01-01T00:00:00",
+                "root": {
+                    "nodeId": "0",
+                    "className": "android.widget.FrameLayout",
+                    "text": "",
+                    "clickable": False,
+                    "scrollable": False,
+                    "editable": False,
+                    "children": [
+                        {
+                            "nodeId": "0.1",
+                            "className": "android.widget.Button",
+                            "text": "OK",
+                            "resourceId": "com.example:id/btn_ok",
+                            "clickable": True,
+                            "scrollable": False,
+                            "editable": False,
+                            "bounds": {"left": 100, "top": 200, "right": 300, "bottom": 260},
+                            "center": {"x": 200, "y": 230},
+                            "children": [],
+                        }
+                    ],
+                },
+            }
+            result = dispatch_command("ui_tree", {}, daemon)
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["source"] == "companion"
+        elements = parsed["data"]["elements"]
+        assert len(elements) == 1
+        assert elements[0]["text"] == "OK"
+        assert elements[0]["node_id"] == "0.1"
+        assert elements[0]["clickable"] is True
+        assert elements[0]["center_x"] == 200
+        assert elements[0]["center_y"] == 230
+
+    def test_ui_tree_adb_falls_back_to_uiautomator(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient, \
+             patch("phone_cli.cli.commands.subprocess") as mock_subproc:
+            mock_instance = MockClient.return_value
+            mock_instance.is_ready.return_value = False
+
+            # Mock uiautomator dump and cat
+            dump_result = MagicMock(returncode=0)
+            cat_result = MagicMock(
+                returncode=0,
+                stdout='<?xml version="1.0" ?><hierarchy><node text="Hello" resource-id="id/txt" class="TextView" bounds="[0,0][100,100]" /></hierarchy>',
+            )
+            mock_subproc.run.side_effect = [dump_result, cat_result]
+
+            result = dispatch_command("ui_tree", {}, daemon)
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["source"] == "uiautomator"
+        assert len(parsed["data"]["elements"]) == 1
+        assert parsed["data"]["elements"][0]["text"] == "Hello"
+
+
+# ── Type command companion integration test ──────────────────────────
+
+class TestTypeCommandCompanion:
+    """Tests for the enhanced type command with companion integration."""
+
+    def test_type_uses_companion_when_available(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            mock_instance = MockClient.return_value
+            mock_instance.is_ready.return_value = True
+            mock_instance.set_text.return_value = {"success": True}
+
+            result = dispatch_command("type", {"text": "hello"}, daemon)
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["typed"] == "hello"
+        assert parsed["data"]["source"] == "companion"
+
+    def test_type_falls_back_to_adb_keyboard(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient, \
+             patch("phone_cli.adb.detect_and_set_adb_keyboard", return_value="orig_ime"), \
+             patch("phone_cli.adb.clear_text"), \
+             patch("phone_cli.adb.type_text"), \
+             patch("phone_cli.adb.restore_keyboard"):
+            mock_instance = MockClient.return_value
+            mock_instance.is_ready.return_value = False
+
+            result = dispatch_command("type", {"text": "hello"}, daemon)
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["typed"] == "hello"
+
+
+# ── Normalize companion tree tests ───────────────────────────────────
+
+class TestNormalizeCompanionTree:
+    """Tests for _normalize_companion_tree."""
+
+    def test_flattens_nested_tree(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "className": "FrameLayout",
+                "text": "",
+                "clickable": False,
+                "scrollable": False,
+                "editable": False,
+                "children": [
+                    {
+                        "nodeId": "0.0",
+                        "className": "Button",
+                        "text": "Submit",
+                        "clickable": True,
+                        "scrollable": False,
+                        "editable": False,
+                        "bounds": {"left": 10, "top": 20, "right": 110, "bottom": 70},
+                        "children": [],
+                    },
+                    {
+                        "nodeId": "0.1",
+                        "className": "EditText",
+                        "text": "",
+                        "contentDescription": "Search",
+                        "editable": True,
+                        "clickable": False,
+                        "scrollable": False,
+                        "center": {"x": 540, "y": 100},
+                        "children": [],
+                    },
+                ],
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 2
+
+        btn = elements[0]
+        assert btn["text"] == "Submit"
+        assert btn["node_id"] == "0.0"
+        assert btn["clickable"] is True
+        assert btn["bounds"] == "[10,20][110,70]"
+        assert btn["center_x"] == 60
+        assert btn["center_y"] == 45
+
+        edit = elements[1]
+        assert edit["content_description"] == "Search"
+        assert edit["editable"] is True
+        assert edit["center_x"] == 540
+
+    def test_empty_tree(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        assert _normalize_companion_tree({}) == []
+        assert _normalize_companion_tree({"root": None}) == []
+
+    def test_skips_nodes_without_info(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "className": "FrameLayout",
+                "text": "",
+                "clickable": False,
+                "scrollable": False,
+                "editable": False,
+                "children": [],
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 0
+
+
+# ── Error code tests ─────────────────────────────────────────────────
+
+class TestCompanionErrorCodes:
+    """Tests for companion error codes in output.py."""
+
+    def test_companion_unavailable_code_exists(self):
+        assert ErrorCode.COMPANION_UNAVAILABLE == "COMPANION_UNAVAILABLE"
+
+    def test_companion_build_failed_code_exists(self):
+        assert ErrorCode.COMPANION_BUILD_FAILED == "COMPANION_BUILD_FAILED"
+
+
+# ── ensure_ready() flow tests ────────────────────────────────────────
+
+class TestCompanionManagerEnsureReady:
+    """Tests for the ensure_ready() decision chain."""
+
+    def _make_manager(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+        mgr = CompanionManager(device_id="test123")
+        return mgr
+
+    def test_ensure_ready_full_happy_path(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(mgr._client, "is_ready", return_value=True):
+            result = mgr.ensure_ready()
+        assert result["available"] is True
+        assert len(result["steps"]) == 4
+
+    def test_ensure_ready_installs_when_not_installed(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=False), \
+             patch.object(mgr, "install", return_value={"installed": True}) as mock_install, \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(mgr._client, "is_ready", return_value=True):
+            result = mgr.ensure_ready()
+        mock_install.assert_called_once()
+        assert result["available"] is True
+
+    def test_ensure_ready_install_failure_returns_error(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=False), \
+             patch.object(mgr, "install", side_effect=RuntimeError("disk full")):
+            result = mgr.ensure_ready()
+        assert result["available"] is False
+        assert "disk full" in result["error"]
+
+    def test_ensure_ready_enables_accessibility_when_disabled(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=False), \
+             patch.object(mgr, "enable_accessibility", return_value={"enabled": True}) as mock_enable, \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(mgr._client, "is_ready", return_value=True):
+            result = mgr.ensure_ready()
+        mock_enable.assert_called_once()
+        assert result["available"] is True
+
+    def test_ensure_ready_accessibility_enable_failure_returns_error(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=False), \
+             patch.object(mgr, "enable_accessibility", return_value={
+                 "enabled": False, "message": "OEM blocked"
+             }):
+            result = mgr.ensure_ready()
+        assert result["available"] is False
+        assert "OEM blocked" in result["error"]
+
+    def test_ensure_ready_sets_up_port_forward_before_readiness_check(self):
+        """Port forwarding must happen BEFORE the readiness poll."""
+        mgr = self._make_manager()
+        call_order = []
+
+        def mock_setup():
+            call_order.append("port_forward")
+            return {"forwarded": True, "http_port": 17342, "ws_port": 17343}
+
+        def mock_is_ready():
+            call_order.append("is_ready")
+            return True
+
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=False), \
+             patch.object(mgr, "setup_port_forward", side_effect=mock_setup), \
+             patch.object(mgr._client, "is_ready", side_effect=mock_is_ready):
+            result = mgr.ensure_ready()
+
+        assert result["available"] is True
+        # port_forward must come before is_ready
+        assert call_order.index("port_forward") < call_order.index("is_ready")
+
+    def test_ensure_ready_port_forward_failure_returns_error(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=False), \
+             patch.object(mgr, "setup_port_forward", side_effect=RuntimeError("port busy")):
+            result = mgr.ensure_ready()
+        assert result["available"] is False
+        assert "port busy" in result["error"]
+
+    def test_ensure_ready_retries_launch_when_not_ready(self):
+        mgr = self._make_manager()
+        ready_calls = [False, False, True]  # Becomes ready on 3rd check
+
+        with patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(mgr._client, "is_ready", side_effect=ready_calls), \
+             patch.object(mgr, "_run_adb") as mock_adb, \
+             patch("phone_cli.adb.companion_manager.time.sleep"):
+            result = mgr.ensure_ready()
+
+        assert result["available"] is True
+        # Should have launched MainActivity to wake up the service
+        mock_adb.assert_called()
+
+
+# ── Normalize companion tree malformed input tests ───────────────────
+
+class TestNormalizeCompanionTreeMalformed:
+    """Tests for _normalize_companion_tree with unexpected input."""
+
+    def test_node_without_bounds(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "text": "Hello",
+                "clickable": True,
+                "scrollable": False,
+                "editable": False,
+                "children": [],
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 1
+        assert elements[0]["bounds"] == ""
+        assert "center_x" not in elements[0]
+
+    def test_node_without_children_key(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "text": "No children key",
+                "clickable": False,
+                "scrollable": False,
+                "editable": False,
+                # No "children" key at all
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 1
+        assert elements[0]["text"] == "No children key"
+
+    def test_node_with_partial_bounds(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "text": "Partial",
+                "clickable": True,
+                "scrollable": False,
+                "editable": False,
+                "bounds": {"left": 10},  # Missing top, right, bottom
+                "children": [],
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 1
+        assert elements[0]["bounds"] == "[10,0][0,0]"
+
+    def test_deeply_nested_tree(self):
+        from phone_cli.cli.commands import _normalize_companion_tree
+
+        tree = {
+            "root": {
+                "nodeId": "0",
+                "text": "",
+                "clickable": False,
+                "scrollable": False,
+                "editable": False,
+                "children": [{
+                    "nodeId": "0.0",
+                    "text": "",
+                    "clickable": False,
+                    "scrollable": False,
+                    "editable": False,
+                    "children": [{
+                        "nodeId": "0.0.0",
+                        "text": "Deep",
+                        "clickable": True,
+                        "scrollable": False,
+                        "editable": False,
+                        "children": [],
+                    }],
+                }],
+            }
+        }
+        elements = _normalize_companion_tree(tree)
+        assert len(elements) == 1
+        assert elements[0]["node_id"] == "0.0.0"
+        assert elements[0]["text"] == "Deep"
+
+
+# ── IPC timeout tests ────────────────────────────────────────────────
+
+class TestIPCTimeout:
+    """Tests for command timeout configuration."""
+
+    def test_companion_setup_timeout_is_300(self):
+        from phone_cli.cli.daemon import PhoneCLIDaemon
+        import tempfile
+
+        daemon = PhoneCLIDaemon(home_dir=tempfile.mkdtemp())
+        assert daemon._get_command_timeout("companion_setup", {}) == 300.0
+
+    def test_default_timeout_is_15(self):
+        from phone_cli.cli.daemon import PhoneCLIDaemon
+        import tempfile
+
+        daemon = PhoneCLIDaemon(home_dir=tempfile.mkdtemp())
+        assert daemon._get_command_timeout("companion_status", {}) == 15.0
+
+
+# ── setup_port_forward error handling tests ──────────────────────────
+
+class TestSetupPortForward:
+    """Tests for setup_port_forward return code checking."""
+
+    def test_port_forward_success(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        ):
+            result = mgr.setup_port_forward()
+        assert result["forwarded"] is True
+
+    def test_port_forward_failure_raises(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+        import pytest
+
+        mgr = CompanionManager()
+        with patch.object(
+            mgr,
+            "_run_adb",
+            return_value=MagicMock(returncode=1, stdout="", stderr="error: device not found"),
+        ):
+            with pytest.raises(RuntimeError, match="port forward failed"):
+                mgr.setup_port_forward()

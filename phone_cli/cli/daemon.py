@@ -323,6 +323,31 @@ class PhoneCLIDaemon:
                         target_id = state.get("device_id") or initial_state.get("device_id")
                         device_ids = [d.device_id for d in devices]
                         connected = bool(device_ids) if not target_id else target_id in device_ids
+
+                        # Check companion only if it was previously set up
+                        if state.get("companion_status"):
+                            try:
+                                from phone_cli.adb.companion_manager import CompanionManager
+                                manager = CompanionManager(device_id=target_id)
+                                if manager.is_port_forwarded():
+                                    from phone_cli.adb.companion import CompanionClient
+                                    client = CompanionClient()
+                                    state["companion_status"] = (
+                                        "ready" if client.is_ready() else "unavailable"
+                                    )
+                                else:
+                                    # Port forwarding lost, try to re-establish
+                                    try:
+                                        manager.setup_port_forward()
+                                        from phone_cli.adb.companion import CompanionClient
+                                        client = CompanionClient()
+                                        state["companion_status"] = (
+                                            "ready" if client.is_ready() else "unavailable"
+                                        )
+                                    except RuntimeError:
+                                        state["companion_status"] = "unavailable"
+                            except Exception:
+                                state["companion_status"] = "unavailable"
                     elif device_type == "hdc":
                         from phone_cli import hdc
                         devices = hdc.list_devices()
@@ -419,6 +444,8 @@ class PhoneCLIDaemon:
             return max(base_timeout, requested_timeout + 5.0)
         if cmd == "install":
             return 120.0
+        if cmd == "companion_setup":
+            return 300.0
         return base_timeout
 
     @staticmethod
