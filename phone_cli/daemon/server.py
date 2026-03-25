@@ -155,9 +155,40 @@ class DaemonServer:
         if session.status != "active":
             return error_response("session_not_found", f"Session status: {session.status}")
         self.session_mgr.touch(session_id)
-        # TODO: real device operation routing in Task 8
+
         action = args.get("action", "")
-        return ok_response({"action": action, "result": {}})
+        slot = self.device_mgr.get_slot(session.device_id) if session.device_id else None
+        if not slot:
+            return error_response("device_disconnected", "Device slot not found")
+
+        with slot.lock:
+            try:
+                result = self._execute_device_action(slot, session, action, args)
+                return ok_response({"action": action, "result": result})
+            except Exception as e:
+                return error_response("operation_failed", str(e))
+
+    def _execute_device_action(self, slot, session, action: str, args: dict) -> dict:
+        """将操作路由到对应平台模块。"""
+        device_type = slot.device_type
+        device_id = slot.device_id
+        if device_type == "adb":
+            from phone_cli import adb
+            module = adb
+        elif device_type == "hdc":
+            from phone_cli import hdc
+            module = hdc
+        elif device_type == "ios":
+            from phone_cli import ios
+            module = ios
+        else:
+            raise ValueError(f"Unknown device type: {device_type}")
+        method = getattr(module, action, None)
+        if method is None:
+            raise ValueError(f"Unknown action: {action} for {device_type}")
+        op_args = {k: v for k, v in args.items() if k not in ("session_id", "action")}
+        result = method(device_id=device_id, **op_args)
+        return result if isinstance(result, dict) else {"raw": result}
 
     def _cmd_release(self, args: dict) -> str:
         session_id = args.get("session_id")
