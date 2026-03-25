@@ -419,5 +419,53 @@ def screen_context():
     _print_json(daemon.send_command("screen_context"))
 
 
+# ── Central daemon commands ──────────────────────────────────────────
+
+@cli.group()
+def daemon():
+    """Central daemon management."""
+    pass
+
+
+@daemon.command("start")
+@click.option("--foreground", is_flag=True, help="Run in foreground")
+def daemon_start(foreground):
+    """Start the central daemon."""
+    from phone_cli.daemon.server import DaemonServer
+    server = DaemonServer()
+    if foreground:
+        server.run_foreground()
+    else:
+        click.echo("Background daemon start not yet implemented")
+
+
+@daemon.command("stop")
+def daemon_stop():
+    """Stop the central daemon."""
+    import os as _os
+    import signal as _signal
+    pid_path = _os.path.expanduser("~/.phone-cli/phone-cli.pid")
+    if not _os.path.exists(pid_path):
+        click.echo("Daemon not running")
+        return
+    with open(pid_path) as f:
+        pid = int(f.read().strip())
+    try:
+        _os.kill(pid, _signal.SIGTERM)
+        click.echo(f"Daemon stopped (pid={pid})")
+    except ProcessLookupError:
+        click.echo("Daemon not running (stale PID)")
+        _os.remove(pid_path)
+
+
+@daemon.command("status")
+def daemon_status():
+    """Show daemon status."""
+    from phone_cli.client import PhoneClient
+    client = PhoneClient()
+    resp = client.status()
+    click.echo(json.dumps(resp, indent=2, ensure_ascii=False))
+
+
 if __name__ == "__main__":
     cli()
