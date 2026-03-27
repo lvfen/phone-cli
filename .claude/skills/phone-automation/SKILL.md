@@ -15,6 +15,16 @@ Supported targets:
 - iOS Simulator via `simctl + host automation`
 - iOS App on Mac via `open + Quartz + AX + host events`
 
+## Architecture
+
+phone-cli 有两层 daemon 架构：
+
+1. **Per-device-type daemon**（现有）：通过 `phone-cli start --device-type adb|hdc|ios` 启动，每个平台一个实例，适合单 AI 会话操控单台设备。
+2. **Central daemon**（新增）：通过 `phone-cli daemon start` 启动，统一管理所有设备的连接、端口和会话生命周期，支持多 AI 会话并行操控不同设备，动态端口分配，空闲超时自动释放。
+
+**单会话场景**（大多数情况）：使用现有的 per-device-type daemon 即可，流程不变。
+**多会话并行场景**：使用 central daemon，AI 通过 `PhoneClient` 或 `phone-cli daemon` 命令申请/释放设备。
+
 ## Trigger Conditions
 
 Use this skill when the user mentions:
@@ -42,16 +52,9 @@ If `adb devices` fails with "Address already in use" or "failed to start daemon"
 2. Kill the stale process: `kill <PID>`
 3. Wait 2 seconds, then retry `adb devices`
 
+Note: When using the central daemon, ADB server ports are dynamically allocated from range 5037-5099. If port 5037 is occupied, the daemon automatically uses the next available port. Manual recovery is only needed for the per-device-type daemon mode.
+
 ## Step 1: Startup And Target Selection
-
-**Multi-instance rule:**
-
-- If exactly one daemon instance is running, bare `phone-cli ...` commands are acceptable.
-- If Android / HarmonyOS / iOS daemon instances may coexist, always prefix commands with the selected instance:
-  - Android: `phone-cli --instance adb ...`
-  - HarmonyOS: `phone-cli --instance hdc ...`
-  - iOS: `phone-cli --instance ios ...`
-- If a bare command returns an instance-selection error, rerun it with the explicit instance immediately.
 
 1. Run `phone-cli status`.
 2. Parse the JSON output:
@@ -62,9 +65,9 @@ If `adb devices` fails with "Address already in use" or "failed to start daemon"
 
 ### Android Startup
 
-1. Run `phone-cli --instance adb stop` first to clean up stale Android state.
-2. Run `phone-cli --instance adb start --device-type adb`.
-3. Wait 2 seconds, then run `phone-cli --instance adb status`.
+1. Run `phone-cli stop` first to clean up stale state.
+2. Run `phone-cli start --device-type adb`.
+3. Wait 2 seconds, then run `phone-cli status`.
 4. If it still fails:
    - Check if `phone-cli` is installed
    - Check if `adb` is available
@@ -72,9 +75,9 @@ If `adb devices` fails with "Address already in use" or "failed to start daemon"
 
 ### HarmonyOS Startup
 
-1. Run `phone-cli --instance hdc stop` first to clean up stale HarmonyOS state.
-2. Run `phone-cli --instance hdc start --device-type hdc`.
-3. Wait 2 seconds, then run `phone-cli --instance hdc status`.
+1. Run `phone-cli stop` first to clean up stale state.
+2. Run `phone-cli start --device-type hdc`.
+3. Wait 2 seconds, then run `phone-cli status`.
 4. If it still fails:
    - Check if `phone-cli` is installed
    - Check if `hdc` is available
@@ -112,19 +115,19 @@ phone-cli detect-runtimes --device-type ios
 
 ```bash
 # Real device
-phone-cli --instance ios start --device-type ios --runtime device --device-id <udid>
+phone-cli start --device-type ios --runtime device --device-id <udid>
 
 # Simulator
-phone-cli --instance ios start --device-type ios --runtime simulator --device-id <sim_udid>
+phone-cli start --device-type ios --runtime simulator --device-id <sim_udid>
 
 # App on Mac
-phone-cli --instance ios start --device-type ios --runtime app-on-mac
+phone-cli start --device-type ios --runtime app-on-mac
 ```
 
 6. After startup, run:
 
 ```bash
-phone-cli --instance ios device-info
+phone-cli device-info
 ```
 
 7. Verify:
@@ -144,20 +147,6 @@ phone-cli --instance ios device-info
    - For HarmonyOS, check `hdc list targets`
 4. If multiple targets exist, ask the user which one to use
 5. After selecting a target, always run `phone-cli set-device <ID>`
-
-## Step 1.8: Companion Accessibility Service Setup (Android Only)
-
-After Android daemon startup and target selection, set up the Companion service for enhanced UI access:
-
-1. Run `phone-cli companion-status` to check current state
-2. If `service_ready: true` → the companion is already active, proceed to Step 2
-3. If not ready → run `phone-cli companion-setup`
-   - This command automatically: detects APK → builds from source if needed → installs → enables accessibility → sets up port forwarding
-   - First-time build requires Android SDK + Java 17 and takes ~1-2 minutes
-4. If auto-enable fails (some OEM ROMs like Xiaomi/OPPO/Vivo block programmatic enable):
-   - Guide the user to manually enable: Settings > Accessibility > Select to Speak > ON
-   - Then rerun `phone-cli companion-setup` to complete port forwarding
-5. **Companion failure does NOT block the workflow** → fall back to uiautomator (the existing flow continues to work)
 
 ### iOS
 
@@ -247,33 +236,16 @@ Execute `phone-cli` commands directly in main session via Bash:
 # Example: observe screen state via UI node tree (preferred)
 phone-cli ui-tree
 # Parse node text/bounds to understand current screen and locate elements
-# If source=companion, you also get nodeId, clickable, scrollable, editable fields
-
-# Companion available (source=companion) — use semantic operations:
-phone-cli screen-context              # Quick interactive elements summary
-phone-cli find-nodes --text "登录"     # Search by text
-phone-cli find-nodes --clickable       # Find all clickable elements
-phone-cli click-node "0.3.1"          # Click by nodeId (from ui-tree or find-nodes)
-phone-cli click-node "0.3.1" --fallback-x 200 --fallback-y 230  # With coordinate fallback
-
-# Companion unavailable (source=uiautomator) or non-Android — use coordinates:
-phone-cli tap 500 300
 
 # Example: take a screenshot (only when visual verification needed)
 phone-cli screenshot --resize 720
 # Read the screenshot file path from JSON output, then use Read tool to view it
+
+# Example: tap at position
+phone-cli tap 500 300
 ```
 
-**Observation priority:** Always use `phone-cli ui-tree` first, then evaluate the response:
-
-**Android observation priority chain:**
-1. **Companion UI tree** (ui-tree returns `source: "companion"`) → richest data with nodeId, clickable, scrollable, editable
-   - Use `phone-cli find-nodes` / `phone-cli click-node` / `phone-cli screen-context` for semantic operations
-2. **uiautomator dump** (ui-tree returns `source: "uiautomator"`) → basic text/resource_id/class/bounds
-   - Use coordinate-based tap/swipe
-3. **Screenshot** → final fallback, or when visual verification is needed
-
-**Node quality evaluation:**
+**Observation priority:** Always use `phone-cli ui-tree` first, then evaluate node quality:
 - **Nodes usable** (≥15% have text or meaningful resource_id): use ui-tree for positioning and verification
 - **Nodes unusable** (<15% useful, typical of Flutter/game/WebView/Canvas): fall back to screenshots
 - **Simulator UI tree unavailable** (`UI_TREE_UNAVAILABLE`): this is expected in MVP, fall back to screenshots
@@ -386,11 +358,9 @@ After execution:
 | `phone-cli app-log` | App logs via logcat | Android-only |
 | `phone-cli install APK` | Install APK | Android-only |
 | `phone-cli version` | Show version | |
-| `phone-cli companion-status` | Companion service status | Android-only; shows installed/enabled/ready |
-| `phone-cli companion-setup` | Build+install+enable companion | Android-only; first run needs SDK+Java 17 |
-| `phone-cli find-nodes` | Search UI nodes | `--text`, `--text-contains`, `--resource-id`, `--class-name`, `--clickable` |
-| `phone-cli click-node NODEID` | Click by nodeId | `--fallback-x`, `--fallback-y` coordinate fallback |
-| `phone-cli screen-context` | Interactive elements summary | Android-only; needs companion |
+| `phone-cli daemon start` | Start central daemon | `--foreground` to run in foreground. Manages multi-session device access with dynamic port allocation |
+| `phone-cli daemon stop` | Stop central daemon | Terminates all device subprocesses and releases ports |
+| `phone-cli daemon status` | Central daemon status | Shows active sessions, devices, ports, and idle times |
 
 ## ADB Diagnostic Command Reference
 
@@ -407,14 +377,3 @@ These commands help diagnose issues beyond what phone-cli provides:
 | `aapt2 dump badging <apk>` | Get APK package name and launcher activity |
 | `adb shell getprop sys.boot_completed` | Check if device has finished booting |
 | `lsof -i :5037` | Find process using ADB port |
-
-## Companion Troubleshooting (Android)
-
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `companion-setup` build fails | Missing Android SDK or Java 17 | Install SDK, set `ANDROID_HOME`; install Java 17, set `JAVA_HOME` |
-| `companion-setup` install fails | Storage full or ADB permission denied | Clear device storage, retry |
-| Accessibility auto-enable fails | OEM security restrictions (Xiaomi/OPPO/Vivo) | Manually enable: Settings > Accessibility > Select to Speak > ON |
-| Companion port forwarding lost | Device reconnected or ADB restarted | Run `phone-cli companion-setup` to re-establish |
-| `ui-tree` returns `source: uiautomator` despite companion installed | Service not running or port forwarding lost | Run `phone-cli companion-status`, then `companion-setup` if needed |
-| `find-nodes` / `click-node` returns `COMPANION_UNAVAILABLE` | Companion service not reachable | Check `companion-status`, re-run `companion-setup` |
