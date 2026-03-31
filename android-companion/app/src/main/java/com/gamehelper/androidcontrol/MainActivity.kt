@@ -170,7 +170,12 @@ class MainActivity : AppCompatActivity() {
         portStatusView.text =
             "Loopback ports: 17342=${yesNo(snapshot.httpPortReachable)}, 17343=${yesNo(snapshot.webSocketPortReachable)}"
         captureStatusView.text =
-            "Last capture: ${snapshot.lastCaptureAt ?: "none"} | Package: ${snapshot.activePackageName ?: "unknown"}"
+            buildString {
+                append("Last capture: ${snapshot.lastCaptureAt ?: "none"} | Package: ${snapshot.activePackageName ?: "unknown"}")
+                if (snapshot.details.isNotEmpty()) {
+                    append("\nDetails: ${snapshot.details.joinToString("; ")}")
+                }
+            }
 
         foregroundToggleButton.text = if (snapshot.foregroundServiceEnabled) {
             getString(R.string.action_stop_keepalive)

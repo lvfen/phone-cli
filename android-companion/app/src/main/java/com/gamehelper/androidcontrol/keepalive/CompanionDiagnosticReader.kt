@@ -14,6 +14,9 @@ class CompanionDiagnosticReader(
 ) {
 
     fun snapshot(): DiagnosticSnapshot {
+        val httpReachable = CompanionRuntimeState.httpServerRunning || isLoopbackPortReachable(17342)
+        val webSocketReachable = CompanionRuntimeState.webSocketServerRunning || isLoopbackPortReachable(17343)
+
         return monitor.evaluate(
             DiagnosticInput(
                 accessibilityEnabled = isAccessibilityEnabled(),
@@ -21,8 +24,8 @@ class CompanionDiagnosticReader(
                 serviceConnected = CompanionRuntimeState.serviceConnected,
                 foregroundServiceEnabled = isForegroundKeepAliveEnabled(),
                 ignoringBatteryOptimizations = batteryOptimizationHelper.isIgnoringBatteryOptimizations(),
-                httpPortReachable = isLoopbackPortReachable(17342),
-                webSocketPortReachable = isLoopbackPortReachable(17343),
+                httpPortReachable = httpReachable,
+                webSocketPortReachable = webSocketReachable,
                 lastCaptureAt = CompanionRuntimeState.lastCaptureAt,
                 activePackageName = CompanionRuntimeState.activePackageName
             )

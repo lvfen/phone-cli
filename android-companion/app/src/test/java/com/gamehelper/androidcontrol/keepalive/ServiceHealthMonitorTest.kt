@@ -64,4 +64,22 @@ class ServiceHealthMonitorTest {
 
         assertEquals("保活配置未完成", monitor.notificationStatus(snapshot))
     }
+
+    @Test
+    fun evaluateProvidesDetailedReasonsForLocalBridgeIssue() {
+        val snapshot = monitor.evaluate(
+            DiagnosticInput(
+                accessibilityEnabled = true,
+                serviceEnabled = true,
+                serviceConnected = true,
+                foregroundServiceEnabled = true,
+                ignoringBatteryOptimizations = true,
+                httpPortReachable = false,
+                webSocketPortReachable = true,
+            )
+        )
+
+        assertEquals("LOCAL_SERVER_UNREACHABLE", snapshot.issueCode)
+        assertTrue(snapshot.details.contains("HTTP 端口 17342 未监听"))
+    }
 }
