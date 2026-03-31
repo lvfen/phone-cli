@@ -15,6 +15,26 @@ class GestureExecutor(
         return dispatch(path, 1L)
     }
 
+    fun doubleTap(x: Int, y: Int, intervalMs: Long = 100): Boolean {
+        val first = tap(x, y)
+        if (!first) return false
+        Thread.sleep(intervalMs)
+        return tap(x, y)
+    }
+
+    fun longPress(x: Int, y: Int, durationMs: Long = 3000): Boolean {
+        val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
+        return dispatch(path, durationMs)
+    }
+
+    fun pressBack(): Boolean {
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+    }
+
+    fun pressHome(): Boolean {
+        return service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME)
+    }
+
     fun swipe(startX: Int, startY: Int, endX: Int, endY: Int, durationMs: Long): Boolean {
         val path = Path().apply {
             moveTo(startX.toFloat(), startY.toFloat())

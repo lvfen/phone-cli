@@ -155,6 +155,32 @@ class CompanionClient:
         """POST /actions/tap — accessibility gesture tap."""
         return self._post("/actions/tap", body={"x": x, "y": y})
 
+    def double_tap(
+        self, x: int, y: int, interval_ms: int = 100
+    ) -> dict[str, Any]:
+        """POST /actions/double-tap — accessibility gesture double tap."""
+        return self._post(
+            "/actions/double-tap",
+            body={"x": x, "y": y, "intervalMs": interval_ms},
+        )
+
+    def long_press(
+        self, x: int, y: int, duration_ms: int = 3000
+    ) -> dict[str, Any]:
+        """POST /actions/long-press — accessibility gesture long press."""
+        return self._post(
+            "/actions/long-press",
+            body={"x": x, "y": y, "durationMs": duration_ms},
+        )
+
+    def back(self) -> dict[str, Any]:
+        """POST /actions/back — accessibility global action back."""
+        return self._post("/actions/back")
+
+    def home(self) -> dict[str, Any]:
+        """POST /actions/home — accessibility global action home."""
+        return self._post("/actions/home")
+
     def swipe(
         self,
         start_x: int,

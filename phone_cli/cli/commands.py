@@ -148,6 +148,30 @@ def _call_device_method(
     return method(*args, **kwargs)
 
 
+def _try_companion(
+    method_name: str,
+    forced_type: str | None = None,
+    **kwargs: Any,
+) -> dict | None:
+    """Try companion accessibility service first unless forced to ADB.
+
+    Returns the companion result dict on success, or None to signal fallback.
+    """
+    if forced_type == "adb":
+        return None
+    try:
+        from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError  # noqa: F811
+        client = CompanionClient()
+        if client.is_ready():
+            method = getattr(client, method_name)
+            result = method(**kwargs)
+            if result.get("success"):
+                return result
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _sync_ios_state(
     daemon: Any,
     device_id: str | None,
@@ -356,8 +380,13 @@ def _cmd_tap(args: dict, daemon: Any) -> str:
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        result = _try_companion("tap", forced_type=args.get("type"), x=x, y=y)
+        if result is not None:
+            return ok_response({"x": x, "y": y, "source": "companion"})
     _call_device_method(daemon, "tap", x, y, device_id=device_id)
-    return ok_response({"x": x, "y": y})
+    return ok_response({"x": x, "y": y, "source": "adb"})
 
 
 @_register("double_tap")
@@ -366,8 +395,13 @@ def _cmd_double_tap(args: dict, daemon: Any) -> str:
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        result = _try_companion("double_tap", forced_type=args.get("type"), x=x, y=y)
+        if result is not None:
+            return ok_response({"x": x, "y": y, "source": "companion"})
     _call_device_method(daemon, "double_tap", x, y, device_id=device_id)
-    return ok_response({"x": x, "y": y})
+    return ok_response({"x": x, "y": y, "source": "adb"})
 
 
 @_register("long_press")
@@ -376,8 +410,13 @@ def _cmd_long_press(args: dict, daemon: Any) -> str:
     w, h = _get_screen_size(daemon)
     conv = CoordConverter(w, h)
     x, y = conv.to_absolute(args["x"], args["y"])
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        result = _try_companion("long_press", forced_type=args.get("type"), x=x, y=y)
+        if result is not None:
+            return ok_response({"x": x, "y": y, "source": "companion"})
     _call_device_method(daemon, "long_press", x, y, device_id=device_id)
-    return ok_response({"x": x, "y": y})
+    return ok_response({"x": x, "y": y, "source": "adb"})
 
 
 @_register("swipe")
@@ -388,6 +427,16 @@ def _cmd_swipe(args: dict, daemon: Any) -> str:
     sx, sy = conv.to_absolute(args["start_x"], args["start_y"])
     ex, ey = conv.to_absolute(args["end_x"], args["end_y"])
     duration_ms = args.get("duration_ms")
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        companion_kwargs: dict[str, Any] = {
+            "start_x": sx, "start_y": sy, "end_x": ex, "end_y": ey,
+        }
+        if duration_ms is not None:
+            companion_kwargs["duration_ms"] = duration_ms
+        result = _try_companion("swipe", forced_type=args.get("type"), **companion_kwargs)
+        if result is not None:
+            return ok_response({"start": [sx, sy], "end": [ex, ey], "source": "companion"})
     _call_device_method(
         daemon,
         "swipe",
@@ -398,7 +447,7 @@ def _cmd_swipe(args: dict, daemon: Any) -> str:
         duration_ms=duration_ms,
         device_id=device_id,
     )
-    return ok_response({"start": [sx, sy], "end": [ex, ey]})
+    return ok_response({"start": [sx, sy], "end": [ex, ey], "source": "adb"})
 
 
 @_register("type")
@@ -409,15 +458,9 @@ def _cmd_type(args: dict, daemon: Any) -> str:
 
     if device_type == "adb":
         # Try companion set_text first (faster, no keyboard switching)
-        try:
-            from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
-            client = CompanionClient()
-            if client.is_ready():
-                result = client.set_text(text)
-                if result.get("success"):
-                    return ok_response({"typed": text, "source": "companion"})
-        except (CompanionUnavailableError, OSError, ValueError, KeyError):
-            pass  # Fall through to ADB keyboard
+        result = _try_companion("set_text", forced_type=args.get("type"), text=text)
+        if result is not None:
+            return ok_response({"typed": text, "source": "companion"})
 
         # Fall back to ADB keyboard flow
         from phone_cli import adb
@@ -447,15 +490,25 @@ def _cmd_type(args: dict, daemon: Any) -> str:
 @_register("back")
 def _cmd_back(args: dict, daemon: Any) -> str:
     device_id = _get_target_id(args, daemon)
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        result = _try_companion("back", forced_type=args.get("type"))
+        if result is not None:
+            return ok_response({"source": "companion"})
     _call_device_method(daemon, "back", device_id=device_id)
-    return ok_response({})
+    return ok_response({"source": "adb"})
 
 
 @_register("home")
 def _cmd_home(args: dict, daemon: Any) -> str:
     device_id = _get_target_id(args, daemon)
+    device_type = _get_device_type(daemon)
+    if device_type == "adb":
+        result = _try_companion("home", forced_type=args.get("type"))
+        if result is not None:
+            return ok_response({"source": "companion"})
     _call_device_method(daemon, "home", device_id=device_id)
-    return ok_response({})
+    return ok_response({"source": "adb"})
 
 
 @_register("launch")

@@ -7,373 +7,205 @@ description: AI-powered phone automation via `phone-cli` across Android (ADB), H
 
 Automate phone operations via `phone-cli` daemon.
 
-Supported targets:
-
-- Android via `adb`
-- HarmonyOS via `hdc`
-- iOS real device via `tidevice + WDA`
-- iOS Simulator via `simctl + host automation`
-- iOS App on Mac via `open + Quartz + AX + host events`
+Supported targets: Android (adb), HarmonyOS (hdc), iOS real device (tidevice + WDA), iOS Simulator (simctl), App on Mac (AX + host events).
 
 ## Architecture
 
 phone-cli 有两层 daemon 架构：
 
-1. **Per-device-type daemon**（现有）：通过 `phone-cli start --device-type adb|hdc|ios` 启动，每个平台一个实例，适合单 AI 会话操控单台设备。
-2. **Central daemon**（新增）：通过 `phone-cli daemon start` 启动，统一管理所有设备的连接、端口和会话生命周期，支持多 AI 会话并行操控不同设备，动态端口分配，空闲超时自动释放。
+1. **Per-device-type daemon**：`phone-cli start --device-type adb|hdc|ios`，每个平台一个实例，适合单 AI 会话操控单台设备。
+2. **Central daemon**：`phone-cli daemon start`，统一管理多设备多会话，动态端口分配。
 
-**单会话场景**（大多数情况）：使用现有的 per-device-type daemon 即可，流程不变。
-**多会话并行场景**：使用 central daemon，AI 通过 `PhoneClient` 或 `phone-cli daemon` 命令申请/释放设备。
+大多数情况使用 per-device-type daemon。
+
+### Android Accessibility-First
+
+Android 下所有手势命令（`tap`、`double-tap`、`long-press`、`swipe`、`back`、`home`、`type`）**默认优先使用 Companion 无障碍服务**，不可用时自动回退到 ADB shell。返回值含 `"source"` 字段。通过 `--type adb` 可强制走 ADB。
+
+### Platform-Specific Constraints
+
+| 平台 | UI Tree | 注意事项 |
+|------|---------|---------|
+| Android | Companion 优先，uiautomator 回退 | Flutter/游戏/WebView 节点质量低，回退截图 |
+| HarmonyOS | 完整 | — |
+| iOS real device | 完整（WDA） | — |
+| iOS Simulator | MVP 暂不可用 | 始终用截图 |
+| App on Mac | AX 树可能稀疏 | 截图为主，ui-tree 为辅 |
 
 ## Trigger Conditions
 
-Use this skill when the user mentions:
-- Phone/mobile operations (截图, 点击, 滑动, 打开App)
-- App testing on real devices, emulators, simulators, or `app_on_mac`
-- ADB/HDC/iOS commands for device interaction
-- Mobile UI automation tasks
+User mentions: phone/mobile operations, app testing, ADB/HDC/iOS commands, mobile UI automation.
 
-## Step 0: Infer Platform And Runtime
+## Step 1: Infer Platform
 
-1. Infer the target platform from the user's wording.
-2. Treat explicit user wording as binding:
-   - `Android` / `ADB` / `emulator` => Android
-   - `HarmonyOS` / `鸿蒙` / `HDC` => HarmonyOS
-   - `iPhone` / `iOS` / `bundle id` / `.app` / `Simulator` / `simctl` / `app_on_mac` / `App on Mac` => iOS
-3. If the user explicitly asks for `device`, `simulator`, or `app_on_mac`, do not override it.
-4. If the request is generic and no platform is implied:
-   - Reuse the currently running connected daemon if it already matches the task
-   - Otherwise default to Android (`adb`)
+1. Explicit wording is binding: `Android`/`ADB`/`emulator` => Android; `HarmonyOS`/`鸿蒙`/`HDC` => HarmonyOS; `iPhone`/`iOS`/`bundle id`/`.app`/`Simulator`/`app_on_mac` => iOS
+2. Generic request: reuse running daemon if it matches, otherwise default to Android
 
-### ADB Port Conflict Recovery
+## Step 2: Startup & Target Selection
 
-If `adb devices` fails with "Address already in use" or "failed to start daemon":
-1. Run `lsof -i :5037` to find the process occupying the ADB port
-2. Kill the stale process: `kill <PID>`
-3. Wait 2 seconds, then retry `adb devices`
+Run `phone-cli status`. If running + connected + correct platform, reuse. Otherwise stop and restart.
 
-Note: When using the central daemon, ADB server ports are dynamically allocated from range 5037-5099. If port 5037 is occupied, the daemon automatically uses the next available port. Manual recovery is only needed for the per-device-type daemon mode.
+### Android / HarmonyOS Startup
 
-## Step 1: Startup And Target Selection
-
-1. Run `phone-cli status`.
-2. Parse the JSON output:
-   - If `"status": "running"` and `"device_status": "connected"` and the daemon already matches the requested platform/runtime, reuse it
-   - If `"device_status": "disconnected"`, stop and restart
-   - If the daemon is running but on the wrong platform/runtime, stop and restart
-   - If `"status": "stopped"` or the command fails, start the right platform flow from scratch
-
-### Android Startup
-
-1. Run `phone-cli stop` first to clean up stale state.
-2. Run `phone-cli start --device-type adb`.
-3. Wait 2 seconds, then run `phone-cli status`.
-4. If it still fails:
-   - Check if `phone-cli` is installed
-   - Check if `adb` is available
-   - Check if a device or emulator is connected
-
-### HarmonyOS Startup
-
-1. Run `phone-cli stop` first to clean up stale state.
-2. Run `phone-cli start --device-type hdc`.
-3. Wait 2 seconds, then run `phone-cli status`.
-4. If it still fails:
-   - Check if `phone-cli` is installed
-   - Check if `hdc` is available
-   - Check if a HarmonyOS device is connected
+1. **检查设备连接**：`adb devices`（Android）或 `hdc list targets`（HarmonyOS）
+2. **有设备** → `phone-cli stop` → `phone-cli start --device-type adb|hdc` → wait 2s → `phone-cli status`
+3. **无设备**（Android）→ 自动尝试启动模拟器：
+   - `emulator -list-avds` 查看可用 AVD
+   - 有 AVD → 仅一个自动选，多个问用户 → 按 "Emulator Auto-Start" 启动
+   - 无 AVD → 告知用户无设备和模拟器，建议连接真机或创建 AVD
+4. **无设备**（HarmonyOS）→ 告知用户无设备，建议检查连接
+5. ADB 端口冲突：`lsof -i :5037`，kill stale process，retry
+6. **（Android）初始化 Companion 无障碍服务**：daemon 启动成功后，运行 `phone-cli companion-setup`
+   - 完整流程：检查 APK 是否存在 → 不存在则编译（`gradlew assembleDebug`，需 ANDROID_HOME + Java 17+）→ 安装到设备 → 启用无障碍权限 → 建立端口转发
+   - **首次运行**会触发 Gradle 编译，耗时 1-3 分钟，后续运行 APK 已存在直接安装
+   - 返回 `"available": true` → Companion 就绪，后续手势/ui-tree 自动走无障碍服务
+   - **编译失败时**（`error_code: COMPANION_BUILD_FAILED`）：**必须将 `error_msg` 原文展示给用户**，让用户自行修复编译环境。常见原因：
+     - `ANDROID_HOME` 或 `ANDROID_SDK_ROOT` 未设置或路径无效
+     - Java 17+ 未安装或版本过低
+     - `android-companion` 项目目录缺失
+     - Gradle 编译错误（依赖下载失败、SDK 版本不匹配等）
+   - 编译失败不阻塞使用，手势回退 ADB shell，ui-tree 退化为 uiautomator
 
 ### iOS Startup
 
-1. If the user explicitly specified `device`, `simulator`, or `app_on_mac`, keep that runtime preference.
-2. Run:
+1. `phone-cli detect-runtimes --device-type ios`
+2. No candidates: report reasons. One: auto-select. Multiple: ask user.
+3. Start: `phone-cli start --device-type ios --runtime device|simulator|app-on-mac [--device-id <id>]`
+4. Verify: `phone-cli device-info`
 
-```bash
-phone-cli detect-runtimes --device-type ios
-```
+### Multi-Device Selection
 
-3. Parse the JSON output:
-   - If there are no candidates:
-     - Report the actual reasons returned by `detect-runtimes`
-     - Suggest the relevant fix:
-       - Real device: connect an iPhone and ensure `tidevice` can see it
-       - Simulator: boot an iOS Simulator first
-       - `app_on_mac`: install host dependencies, grant Accessibility / Screen Recording permissions, then restart the host app and rerun `detect-runtimes`
-   - If there is exactly one candidate:
-     - Auto-select it without asking the user
-   - If there are multiple candidates:
-     - Ask the user which runtime/target to use
-     - Never auto-pick a candidate when multiple are available
-
-4. If the user explicitly requested an iOS runtime:
-   - Filter candidates to that runtime
-   - If none match, tell the user that runtime is currently unavailable
-   - If one matches, use it
-   - If multiple match, ask which target ID to use
-
-5. Start the daemon with an explicit runtime:
-
-```bash
-# Real device
-phone-cli start --device-type ios --runtime device --device-id <udid>
-
-# Simulator
-phone-cli start --device-type ios --runtime simulator --device-id <sim_udid>
-
-# App on Mac
-phone-cli start --device-type ios --runtime app-on-mac
-```
-
-6. After startup, run:
-
-```bash
-phone-cli device-info
-```
-
-7. Verify:
-   - `device_type == ios`
-   - `ios_runtime` matches the selected runtime
-   - `device_status == connected`
-   - `target_id` is present for `device` / `simulator`, or `local-mac` for `app_on_mac`
-
-## Step 1.5: Target Check
-
-### Android / HarmonyOS
-
-1. Run `phone-cli devices`
-2. Parse the device list
-3. If no devices:
-   - For Android, first check `adb devices`
-   - For HarmonyOS, check `hdc list targets`
-4. If multiple targets exist, ask the user which one to use
-5. After selecting a target, always run `phone-cli set-device <ID>`
-
-### iOS
-
-1. If the daemon was just started from `detect-runtimes`, the selected runtime/target is already bound
-2. If the user wants to switch to another real device or Simulator target later, run `phone-cli set-device <ID>`
-3. For `app_on_mac`, treat `local-mac` as the bound target unless future multi-target support is added
+- Android/HarmonyOS: `phone-cli devices` → `phone-cli set-device <ID>`
+- iOS: already bound from detect-runtimes; switch via `phone-cli set-device <ID>`
 
 ### Emulator Auto-Start
 
-If no device is connected and the user wants to use an emulator:
-1. Run `emulator -list-avds` to list available AVDs
-2. If AVDs exist, ask the user which one to use
-3. Start the emulator — **MUST follow these rules**:
-   - **Always run from SDK directory**: `cd $ANDROID_HOME/emulator && ./emulator -avd <name> ...` (running from other directories causes path resolution failures)
-   - **NEVER use `-no-window` flag** — headless mode causes `adb screencap` to return all-black images
-   - **NEVER use `-no-snapshot-load` unless troubleshooting** — cold boot takes 60+ seconds vs ~10s for snapshot
-   - Recommended flags: `./emulator -avd <name> -no-audio -no-boot-anim`
-4. Wait for boot: `adb wait-for-device && adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 2; done'`
-5. Verify boot: `adb shell getprop sys.boot_completed` should return `1`
+1. `emulator -list-avds`, ask user which AVD
+2. **Always** `cd $ANDROID_HOME/emulator && ./emulator -avd <name> -no-audio -no-boot-anim`
+3. **NEVER** use `-no-window`（黑屏）or `-no-snapshot-load`（慢）
+4. Wait: `adb wait-for-device && adb shell 'while [[ -z $(getprop sys.boot_completed) ]]; do sleep 2; done'`
 
-### Emulator Troubleshooting
+## Step 3: Device Sanity Check
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `screencap` returns all-black PNG | Emulator started with `-no-window` (headless mode) | Kill emulator, restart WITHOUT `-no-window` |
-| Screenshots black after snapshot restore | Renderer mismatch between snapshot and current session | Kill emulator, restart with `-no-snapshot-load` for a cold boot |
-| `qemu-system not found` error | Emulator started from wrong working directory | Always `cd $ANDROID_HOME/emulator` before running `./emulator` |
-| Emulator process exists but no ADB device | ADB port conflict or daemon crash | Kill old ADB (`lsof -i :5037`), then `adb kill-server && adb start-server` |
-| `kill <PID>` doesn't stop emulator | Emulator ignores SIGTERM gracefully | Use `kill -9 <PID>` on the `qemu-system-*` process |
+1. `phone-cli ui-tree` — valid nodes → proceed
+2. `UI_TREE_UNAVAILABLE` → `phone-cli check-screen`:
+   - `all_black`/`all_white`: `phone-cli home`, wait 2s, re-check; emulator may need restart with `-no-snapshot-load`
+   - `normal` → proceed
 
-## Step 2: Device Sanity Check (before any real work)
+## Step 4: Task Classification
 
-**After device is connected, verify device responsiveness before proceeding:**
+| Type | Criteria | Action |
+|------|----------|--------|
+| Simple | Single operation | Execute directly |
+| Medium | 2-5 steps, linear flow | Execute sequentially |
+| Complex | Multi-step, dynamic decisions | Brainstorming → Subagent |
 
-1. Run `phone-cli ui-tree` to check if the UI node tree is available
-2. If UI tree returns valid nodes → device is responsive, proceed to Step 3
-3. If `UI_TREE_UNAVAILABLE`, fall back to screenshot check:
-   a. Run `phone-cli check-screen` to check screen health
-   b. If `screen_state` is `all_black` or `all_white`:
-      - First press Home: `phone-cli home`, wait 2 seconds, re-check
-      - For Android emulators, try: kill emulator, restart with `-no-snapshot-load`
-      - For iOS Simulator / `app_on_mac`, treat this as a runtime or host issue first, not an app bug
-      - If still abnormal → tell the user the target environment itself is unhealthy
-   c. If `screen_state` is `normal` → proceed to Step 3
+## Step 5 (Complex Tasks): Brainstorming
 
-**This step prevents wasting time debugging issues that are actually device/emulator problems.**
+1. Clarify goal and success criteria
+2. Decompose into steps with `action` + `success_criteria`
+3. Identify sensitive operations and login/auth limitations
+4. User confirms plan → output structured task plan for subagent
 
-**Important iOS note:**
-
-- On `ios-simulator`, `ui-tree` being unavailable is expected in MVP. Fall back to `check-screen` and screenshots.
-- On `app_on_mac`, AX tree may be sparse. If nodes are low quality, prefer screenshot + coordinates.
-
-## Step 3: Task Classification
-
-Classify the user's request:
-
-| Type | Criteria | Examples | Action |
-|------|----------|----------|--------|
-| Simple | Single operation, no screenshot analysis needed | "截图", "回主页", "查看当前App" | Execute directly via `phone-cli` in main session |
-| Medium | 2-5 steps, clear linear flow | "打开掌上穿越火线截个图", "输入文字并点击发送" | Execute sequentially via `phone-cli` in main session |
-| Complex | Multi-step, needs dynamic decisions based on screen content | "在App中搜索XXX并筛选评分最高的", "完成签到流程" | Brainstorming → Subagent |
-
-## Step 4 (Complex Tasks): Brainstorming
-
-Invoke the brainstorming workflow to work with the user:
-
-1. Clarify the final goal and success criteria
-2. Decompose into ordered steps, each with:
-   - `action`: what to do
-   - `success_criteria`: how to verify it worked
-3. Identify sensitive operations: sending messages, submitting forms, payments
-4. Identify login/auth requirements:
-   - Android emulators may be limited for apps requiring real-device login
-   - iOS Simulator may be limited for flows that depend on real-device entitlements
-   - `app_on_mac` may expose sparse accessibility info for some apps
-5. User confirms the plan
-
-Output a structured task plan for the subagent.
-
-## Step 5: Execution
+## Step 6: Execution
 
 ### Simple/Medium Tasks
 
-Execute `phone-cli` commands directly in main session via Bash:
-
 ```bash
-# Example: observe screen state via UI node tree (preferred)
+# Android 首选：通过节点树观察和定位（快速、精确、无需视觉推理）
 phone-cli ui-tree
-# Parse node text/bounds to understand current screen and locate elements
+# 解析节点 text/bounds/resource_id 定位目标元素，取 bounds 中心点坐标
 
-# Example: take a screenshot (only when visual verification needed)
-phone-cli screenshot --resize 720
-# Read the screenshot file path from JSON output, then use Read tool to view it
-
-# Example: tap at position
+# 操作
 phone-cli tap 500 300
+
+# 仅在需要视觉确认时才截图（颜色、图片、动画、Flutter/游戏页面）
+phone-cli screenshot --resize 720
 ```
 
-**Observation priority:** Always use `phone-cli ui-tree` first, then evaluate node quality:
-- **Nodes usable** (≥15% have text or meaningful resource_id): use ui-tree for positioning and verification
-- **Nodes unusable** (<15% useful, typical of Flutter/game/WebView/Canvas): fall back to screenshots
-- **Simulator UI tree unavailable** (`UI_TREE_UNAVAILABLE`): this is expected in MVP, fall back to screenshots
-- **App on Mac AX tree sparse**: use screenshots for positioning, treat ui-tree as supplemental only
-- **App on Mac post-launch check**: after `launch`, always cross-check `wait-for-app` with one screenshot or `ui-tree` before trusting the target window
-- Need visual verification (colors, images, layout): take screenshot regardless
+### Observation & Verification
 
-All commands output JSON. Parse `status` field to check success.
+**Android / HarmonyOS 观察策略（Accessibility-First）：**
 
-### App Launch & Verification
+`phone-cli ui-tree` 是 Android 下的**主力观察和验证工具**，不是备选。节点树返回完整的文本、bounds、clickable/editable 属性，能直接用于：
+- **定位元素**：通过 text/content-desc 找到按钮、输入框，取 bounds 中心点坐标
+- **验证页面状态**：检查预期文本是否出现、页面标题是否切换、列表内容是否加载
+- **确认操作结果**：输入后检查 editable 节点文本、点击后检查新页面节点
 
-When launching an app:
-1. Prefer the platform-native launch path:
-   - Android: `phone-cli install <apk> --launch` or `phone-cli launch <app_name>`
-   - iOS real device / Simulator / `app_on_mac`: `phone-cli launch --bundle-id <bundle_id>`
-   - For local iOS `.app` bundles on Simulator / `app_on_mac`: `phone-cli launch --app-path "/path/to/App.app"`
-2. Wait for readiness:
-   - Android: `phone-cli wait-for-app <package> --timeout 10`
-   - iOS: `phone-cli wait-for-app --bundle-id <bundle_id> --timeout 10`
-3. Verify foreground state:
-   - Android: `phone-cli app-state --package <package>`
-   - iOS: `phone-cli app-state --bundle-id <bundle_id>`
-4. If the app is still not foreground:
-   - It may have redirected, crashed, or not finished activating
-   - Use `phone-cli get-current-app`
-   - Then inspect UI tree or screenshot
-5. `app_on_mac` special handling:
-   - If `wait-for-app` times out but screenshot or `ui-tree` already shows the expected target window, treat it as focus-detection lag and continue
-   - If screenshot or `ui-tree` clearly shows another app window after `launch`, rerun the same `phone-cli launch --bundle-id <bundle_id>` once to refresh window binding, then retry observation
-   - If `app-state` / `get-current-app` and screenshot / `ui-tree` disagree, trust the bound window evidence first, then refresh once by relaunching the same bundle
-6. Take a screenshot only when visual verification is needed
+**截图仅在以下场景使用：**
+- 节点质量低（Flutter/游戏/WebView/Canvas —— 多数节点无 text 和有意义的 resource_id）
+- 需要视觉信息（颜色、图片内容、动画状态、布局样式）
+- ui-tree 返回 `UI_TREE_UNAVAILABLE`
+- iOS Simulator（ui-tree 暂不可用）
+
+**ui-tree 质量退化规则**：当前任务中 ui-tree 已使用 3+ 次且有效率持续偏低（<15% 节点有 text 或有意义的 resource_id），后续该任务直接用截图。页面切换到新 App 或全新页面类型时可重新评估。
+
+**是否需要验证**：根据操作自行判断。页面导航、app 启动、表单提交等需验证；简单 `back`/`home`、已知流程中的中间点击通常无需验证。
+
+### App Launch
+
+1. Android: `phone-cli launch <app>` → `phone-cli wait-for-app <pkg> --timeout 10` → `phone-cli app-state --package <pkg>`
+2. iOS: `phone-cli launch --bundle-id <id>` → `phone-cli wait-for-app --bundle-id <id> --timeout 10`
+3. Not foreground: `phone-cli get-current-app`, then inspect ui-tree or screenshot
+4. `app_on_mac`: timeout but screenshot shows correct window → focus-detection lag, continue
 
 ### Diagnosing Black/Blank Screens
 
-When UI tree shows no meaningful elements or screenshot shows a black/empty screen **after confirming the device works (Step 2)**:
-
-1. Check app state:
-   - Android: `phone-cli app-state --package <package>`
-   - iOS: `phone-cli app-state --bundle-id <bundle_id>`
-2. Check the current foreground app:
-   ```bash
-   phone-cli get-current-app
-   ```
-3. If Android:
-   - Check for crashes: `phone-cli app-log --package <package> --filter crash`
-   - Trace lifecycle: `phone-cli app-log --package <package> --filter lifecycle`
-4. If iOS:
-   - Prefer `phone-cli screenshot --resize 720`
-   - For Simulator, remember `ui-tree` unavailability is expected in MVP
-   - For `app_on_mac`, sparse AX data is expected for some UIKit / Flutter / custom-rendered views
-   - For `app_on_mac`, if the captured window belongs to the wrong app, relaunch the same bundle once to refresh window binding before deeper debugging
-   - `app-log` is not yet supported for iOS runtimes
-5. Common causes:
-   - App requires login or entitlements unavailable on emulator / simulator
-   - App briefly launches and exits
-   - The page is visually dark but not actually broken
-   - The target runtime itself is unhealthy or missing required permissions
+1. `phone-cli app-state` + `phone-cli get-current-app`
+2. Android: `phone-cli app-log --package <pkg> --filter crash|lifecycle`
+3. iOS: screenshot only (`app-log` not yet supported)
 
 ### Complex Tasks
 
-Launch a subagent via the Agent tool with:
-- `subagent_type`: use default (general-purpose)
-- Prompt: load `prompts/subagent.md` template, inject the task steps and rules from `prompts/rules_zh.md`
-- The subagent runs the observe→think→act loop autonomously
+Launch subagent via Agent tool: load `prompts/subagent.md`, inject steps and `prompts/rules_zh.md`.
 
-### Sensitive Operation Handling
+**Sensitive Operations**: subagent must stop and return `CONFIRM_REQUIRED` for messages/forms/payments; main session gets user approval before continuing.
 
-The subagent prompt includes a "confirm" tier for operations like sending messages or submitting forms. When the subagent encounters these, it must:
+## Step 7: Result Report
 
-1. Stop execution and return a confirmation request with details of the pending action
-2. The main session presents this to the user for approval
-3. On approval, re-dispatch the subagent to continue from that step
-4. On rejection, skip the step or abort the task
+- Report step-by-step status and key screenshots
+- On failure: analyze cause, ask user to retry or re-plan
 
-## Step 6: Result Report
+## Command Reference
 
-After execution:
-- Report results to the user (step-by-step status, key screenshots)
-- On failure: analyze cause, ask user whether to retry or re-plan
+Android gesture commands default to Companion accessibility service. Pass `--type adb` to force ADB.
 
-## phone-cli Command Reference
+| Command | Description | Options |
+|---------|-------------|---------|
+| `status` | Daemon state | |
+| `start` | Start daemon | `--device-type adb\|hdc\|ios`, `--runtime`, `--device-id` |
+| `stop` | Stop daemon | |
+| `detect-runtimes` | iOS runtimes | `--device-type ios` |
+| `devices` | List devices | |
+| `set-device ID` | Bind target | |
+| `device-info` | Device info | |
+| `companion-setup` | Init Companion accessibility (Android) | Auto: install, enable, port-forward |
+| `screenshot` | Screenshot | `--resize 720`, `--task-id`, `--step` |
+| `tap X Y` | Tap (0-999) | `--type adb\|companion` |
+| `double-tap X Y` | Double tap | `--type adb\|companion` |
+| `long-press X Y` | Long press | `--type adb\|companion` |
+| `swipe X1 Y1 X2 Y2` | Swipe | `--type adb\|companion` |
+| `type "text"` | Type (auto-clear) | `--type adb\|companion` |
+| `back` | Back | `--type adb\|companion` |
+| `home` | Home | `--type adb\|companion` |
+| `launch` | Launch app | `APP`, `--bundle-id`, `--app-path` |
+| `get-current-app` | Foreground app | |
+| `ui-tree` | UI hierarchy | |
+| `app-state` | App state | `--package` or `--bundle-id` |
+| `wait-for-app` | Wait ready | `PKG`/`--bundle-id`, `--timeout` |
+| `check-screen` | Screen health | `--threshold` |
+| `app-log` | Logs (Android) | `--package`, `--filter` |
+| `install APK` | Install (Android) | `--launch` |
+| `clean-screenshots` | Clean files | `--all` |
+| `log` | Daemon logs | `--tail`, `--task` |
+| `version` | Version | |
+| `daemon start\|stop\|status` | Central daemon | `--foreground` |
 
-| Command | Usage | Description |
-|---------|-------|-------------|
-| `phone-cli status` | Status check | Returns daemon state as JSON |
-| `phone-cli start` | Start daemon | `--device-type adb\|hdc\|ios`; iOS also supports `--runtime device\|simulator\|app-on-mac` |
-| `phone-cli detect-runtimes` | Detect iOS runtime candidates | `--device-type ios` |
-| `phone-cli stop` | Stop daemon | |
-| `phone-cli devices` | List devices | |
-| `phone-cli set-device ID` | Set target device | |
-| `phone-cli device-info` | Current device info | |
-| `phone-cli screenshot` | Take screenshot | `--resize 720`, `--task-id`, `--step` |
-| `phone-cli tap X Y` | Tap | 0-999 relative coordinates |
-| `phone-cli double-tap X Y` | Double tap | |
-| `phone-cli long-press X Y` | Long press | |
-| `phone-cli swipe X1 Y1 X2 Y2` | Swipe | |
-| `phone-cli type "text"` | Type text | Auto-clears existing text first |
-| `phone-cli back` | Press back | |
-| `phone-cli home` | Press home | |
-| `phone-cli launch APP` | Launch app by name | Use app name from config |
-| `phone-cli launch --bundle-id ID` | Launch app by bundle ID | Preferred for iOS |
-| `phone-cli launch --app-path PATH` | Launch app by `.app` path | iOS Simulator / `app_on_mac` local builds |
-| `phone-cli get-current-app` | Current app | |
-| `phone-cli ui-tree` | UI hierarchy | For precise element location |
-| `phone-cli clean-screenshots` | Clean old screenshots | `--all` to remove all |
-| `phone-cli log` | View logs | `--tail N`, `--task ID` |
-| `phone-cli app-state` | App foreground state | Android: `--package PKG`; iOS: `--bundle-id ID` |
-| `phone-cli wait-for-app` | Wait for app ready | Android: positional package; iOS: `--bundle-id ID`; `--timeout`, `--state resumed\|running` |
-| `phone-cli check-screen` | Screen health check | `--threshold 0.95` (all-black/white detect) |
-| `phone-cli app-log` | App logs via logcat | Android-only |
-| `phone-cli install APK` | Install APK | Android-only |
-| `phone-cli version` | Show version | |
-| `phone-cli daemon start` | Start central daemon | `--foreground` to run in foreground. Manages multi-session device access with dynamic port allocation |
-| `phone-cli daemon stop` | Stop central daemon | Terminates all device subprocesses and releases ports |
-| `phone-cli daemon status` | Central daemon status | Shows active sessions, devices, ports, and idle times |
+## Troubleshooting
 
-## ADB Diagnostic Command Reference
-
-These commands help diagnose issues beyond what phone-cli provides:
-
-| Command | Purpose |
-|---------|---------|
-| `adb shell dumpsys activity top \| grep "ACTIVITY\|mResumed"` | Check which activity is in foreground |
-| `adb logcat -d --pid=$(adb shell pidof <pkg>) \| tail -30` | View app's recent logs |
-| `adb logcat -d \| grep -iE "crash\|exception\|fatal"` | Find crashes |
-| `adb shell am force-stop <pkg>` | Force stop an app |
-| `adb shell am start -n <pkg>/<activity>` | Start a specific activity |
-| `adb shell pm list packages \| grep <keyword>` | Find installed packages |
-| `aapt2 dump badging <apk>` | Get APK package name and launcher activity |
-| `adb shell getprop sys.boot_completed` | Check if device has finished booting |
-| `lsof -i :5037` | Find process using ADB port |
+| Symptom | Fix |
+|---------|-----|
+| screencap 全黑 | 勿用 `-no-window`，重启模拟器 |
+| snapshot 恢复后黑屏 | 用 `-no-snapshot-load` 冷启动 |
+| `qemu-system not found` | 先 `cd $ANDROID_HOME/emulator` |
+| 模拟器存在但无 ADB 设备 | `lsof -i :5037` → kill → `adb kill-server && adb start-server` |

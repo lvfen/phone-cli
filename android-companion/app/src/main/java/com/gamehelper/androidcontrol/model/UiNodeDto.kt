@@ -138,3 +138,15 @@ data class ScreenContextDto(
     val clickableNodes: List<ScreenContextNodeDto> = emptyList(),
     val editableNodes: List<ScreenContextNodeDto> = emptyList()
 )
+
+data class DoubleTapRequestDto(
+    val x: Int,
+    val y: Int,
+    val intervalMs: Long = 100L
+)
+
+data class LongPressRequestDto(
+    val x: Int,
+    val y: Int,
+    val durationMs: Long = 3000L
+)

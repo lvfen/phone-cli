@@ -4,7 +4,9 @@ import com.gamehelper.androidcontrol.actions.GestureExecutor
 import com.gamehelper.androidcontrol.actions.NodeActionExecutor
 import com.gamehelper.androidcontrol.capture.HierarchyCaptureManager
 import com.gamehelper.androidcontrol.model.CompanionStatusDto
+import com.gamehelper.androidcontrol.model.DoubleTapRequestDto
 import com.gamehelper.androidcontrol.model.FindNodesResultDto
+import com.gamehelper.androidcontrol.model.LongPressRequestDto
 import com.gamehelper.androidcontrol.model.NodeActionRequestDto
 import com.gamehelper.androidcontrol.model.NodeQueryDto
 import com.gamehelper.androidcontrol.model.ScreenContextDto
@@ -125,6 +127,28 @@ class CompanionHttpServer(
                         payload.endY,
                         payload.durationMs
                     )
+                    Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
+                }
+
+                request.method == "POST" && request.path == "/actions/double-tap" -> {
+                    val payload = gson.fromJson(request.body, DoubleTapRequestDto::class.java)
+                    val success = gestureExecutor.doubleTap(payload.x, payload.y, payload.intervalMs)
+                    Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
+                }
+
+                request.method == "POST" && request.path == "/actions/long-press" -> {
+                    val payload = gson.fromJson(request.body, LongPressRequestDto::class.java)
+                    val success = gestureExecutor.longPress(payload.x, payload.y, payload.durationMs)
+                    Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
+                }
+
+                request.method == "POST" && request.path == "/actions/back" -> {
+                    val success = gestureExecutor.pressBack()
+                    Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
+                }
+
+                request.method == "POST" && request.path == "/actions/home" -> {
+                    val success = gestureExecutor.pressHome()
                     Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
                 }
 

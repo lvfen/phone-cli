@@ -165,28 +165,40 @@ def screenshot(resize, task_id, step):
 @cli.command()
 @click.argument("x", type=int)
 @click.argument("y", type=int)
-def tap(x, y):
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def tap(x, y, input_type):
     """Tap at coordinates (0-999 relative)."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("tap", {"x": x, "y": y}))
+    args = {"x": x, "y": y}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("tap", args))
 
 
 @cli.command(name="double-tap")
 @click.argument("x", type=int)
 @click.argument("y", type=int)
-def double_tap(x, y):
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def double_tap(x, y, input_type):
     """Double tap at coordinates (0-999 relative)."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("double_tap", {"x": x, "y": y}))
+    args = {"x": x, "y": y}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("double_tap", args))
 
 
 @cli.command(name="long-press")
 @click.argument("x", type=int)
 @click.argument("y", type=int)
-def long_press(x, y):
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def long_press(x, y, input_type):
     """Long press at coordinates (0-999 relative)."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("long_press", {"x": x, "y": y}))
+    args = {"x": x, "y": y}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("long_press", args))
 
 
 @cli.command()
@@ -194,32 +206,48 @@ def long_press(x, y):
 @click.argument("y1", type=int)
 @click.argument("x2", type=int)
 @click.argument("y2", type=int)
-def swipe(x1, y1, x2, y2):
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def swipe(x1, y1, x2, y2, input_type):
     """Swipe from (x1,y1) to (x2,y2) (0-999 relative)."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("swipe", {"start_x": x1, "start_y": y1, "end_x": x2, "end_y": y2}))
+    args = {"start_x": x1, "start_y": y1, "end_x": x2, "end_y": y2}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("swipe", args))
 
 
 @cli.command(name="type")
 @click.argument("text")
-def type_text(text):
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def type_text(text, input_type):
     """Type text into focused input."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("type", {"text": text}))
+    args = {"text": text}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("type", args))
 
 
 @cli.command()
-def back():
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def back(input_type):
     """Press back button."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("back"))
+    args = {}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("back", args))
 
 
 @cli.command()
-def home():
+@click.option("--type", "input_type", default=None, type=click.Choice(["adb", "companion"]), help="Force input backend (default: companion-first)")
+def home(input_type):
     """Press home button."""
     daemon = _get_daemon()
-    _print_json(daemon.send_command("home"))
+    args = {}
+    if input_type:
+        args["type"] = input_type
+    _print_json(daemon.send_command("home", args))
 
 
 @cli.command()
