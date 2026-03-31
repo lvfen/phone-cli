@@ -18,6 +18,7 @@ INSTANCE_DIRNAME = "instances"
 MANAGED_INSTANCE_NAMES = ("adb", "hdc", "ios")
 MAX_QUEUE_DEPTH = 10
 HEARTBEAT_INTERVAL = 30  # seconds
+COMPANION_HEALTH_CHECK_INTERVAL = 5  # seconds
 
 
 def _setup_logger(log_dir: str, *, logger_name: str) -> logging.Logger:
@@ -306,7 +307,34 @@ class PhoneCLIDaemon:
     def _start_heartbeat(self, initial_state: dict[str, Any]) -> None:
         """Start a background thread to check device connectivity."""
 
+        def _refresh_companion_health(state: dict[str, Any], target_id: str | None) -> dict[str, Any]:
+            try:
+                from phone_cli.adb.companion_manager import CompanionManager
+
+                manager = CompanionManager(device_id=target_id)
+                if not manager.is_port_forwarded():
+                    try:
+                        manager.setup_port_forward()
+                    except RuntimeError:
+                        pass
+
+                companion_health = manager.get_status()
+                state["companion_health"] = companion_health
+                state["companion_status"] = "ready" if companion_health.get("ready") else "degraded"
+                state["companion_last_checked_at"] = datetime.now().isoformat()
+            except Exception as exc:
+                state["companion_status"] = "unavailable"
+                state["companion_health"] = {
+                    "ready": False,
+                    "issue_codes": ["HEARTBEAT_CHECK_FAILED"],
+                    "issues": [f"守护进程健康检查失败: {exc}"],
+                    "recommended_action": "重新执行 companion-status 查看详细诊断。",
+                }
+                state["companion_last_checked_at"] = datetime.now().isoformat()
+            return state
+
         def _heartbeat_loop() -> None:
+            next_companion_check = 0.0
             while not self._stop_event.is_set():
                 self._stop_event.wait(timeout=HEARTBEAT_INTERVAL)
                 if self._stop_event.is_set():
@@ -325,29 +353,10 @@ class PhoneCLIDaemon:
                         connected = bool(device_ids) if not target_id else target_id in device_ids
 
                         # Check companion only if it was previously set up
-                        if state.get("companion_status"):
-                            try:
-                                from phone_cli.adb.companion_manager import CompanionManager
-                                manager = CompanionManager(device_id=target_id)
-                                if manager.is_port_forwarded():
-                                    from phone_cli.adb.companion import CompanionClient
-                                    client = CompanionClient()
-                                    state["companion_status"] = (
-                                        "ready" if client.is_ready() else "unavailable"
-                                    )
-                                else:
-                                    # Port forwarding lost, try to re-establish
-                                    try:
-                                        manager.setup_port_forward()
-                                        from phone_cli.adb.companion import CompanionClient
-                                        client = CompanionClient()
-                                        state["companion_status"] = (
-                                            "ready" if client.is_ready() else "unavailable"
-                                        )
-                                    except RuntimeError:
-                                        state["companion_status"] = "unavailable"
-                            except Exception:
-                                state["companion_status"] = "unavailable"
+                        now = time.monotonic()
+                        if state.get("companion_status") and now >= next_companion_check:
+                            state = _refresh_companion_health(state, target_id)
+                            next_companion_check = now + COMPANION_HEALTH_CHECK_INTERVAL
                     elif device_type == "hdc":
                         from phone_cli import hdc
                         devices = hdc.list_devices()

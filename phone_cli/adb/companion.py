@@ -140,6 +140,32 @@ class CompanionClient:
             }
         return self._post("/actions/click-node", body=body)
 
+    def search_and_click(
+        self,
+        text: str | None = None,
+        text_contains: str | None = None,
+        resource_id: str | None = None,
+        class_name: str | None = None,
+        package_name: str | None = None,
+        clickable: bool | None = None,
+        index: int = 0,
+    ) -> dict[str, Any]:
+        """POST /actions/search-click — search a node and click it in one round-trip."""
+        body: dict[str, Any] = {"index": index}
+        if text is not None:
+            body["text"] = text
+        if text_contains is not None:
+            body["textContains"] = text_contains
+        if resource_id is not None:
+            body["resourceId"] = resource_id
+        if class_name is not None:
+            body["className"] = class_name
+        if package_name is not None:
+            body["packageName"] = package_name
+        if clickable is not None:
+            body["clickable"] = clickable
+        return self._post("/actions/search-click", body=body)
+
     def set_text(
         self,
         text: str,
@@ -150,6 +176,35 @@ class CompanionClient:
         if node_id is not None:
             body["nodeId"] = node_id
         return self._post("/actions/set-text", body=body)
+
+    def search_and_set_text(
+        self,
+        text: str,
+        match_text: str | None = None,
+        text_contains: str | None = None,
+        resource_id: str | None = None,
+        class_name: str | None = None,
+        package_name: str | None = None,
+        index: int = 0,
+        use_focused_fallback: bool = True,
+    ) -> dict[str, Any]:
+        """POST /actions/search-set-text — search an input node and set text in one round-trip."""
+        body: dict[str, Any] = {
+            "text": text,
+            "index": index,
+            "useFocusedFallback": use_focused_fallback,
+        }
+        if match_text is not None:
+            body["matchText"] = match_text
+        if text_contains is not None:
+            body["textContains"] = text_contains
+        if resource_id is not None:
+            body["resourceId"] = resource_id
+        if class_name is not None:
+            body["className"] = class_name
+        if package_name is not None:
+            body["packageName"] = package_name
+        return self._post("/actions/search-set-text", body=body)
 
     def tap(self, x: int, y: int) -> dict[str, Any]:
         """POST /actions/tap — accessibility gesture tap."""

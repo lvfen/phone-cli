@@ -5,6 +5,15 @@ object CompanionRuntimeState {
     var serviceConnected: Boolean = false
 
     @Volatile
+    var httpServerRunning: Boolean = false
+
+    @Volatile
+    var webSocketServerRunning: Boolean = false
+
+    @Volatile
+    var startupError: String? = null
+
+    @Volatile
     var lastCaptureAt: String? = null
 
     @Volatile

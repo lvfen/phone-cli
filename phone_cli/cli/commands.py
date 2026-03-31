@@ -172,6 +172,22 @@ def _try_companion(
     return None
 
 
+def _companion_client_or_error() -> tuple[Any | None, str | None]:
+    """Return a ready companion client or an error response payload."""
+    try:
+        from phone_cli.adb.companion import CompanionClient, CompanionUnavailableError
+
+        client = CompanionClient()
+        if not client.is_ready():
+            return None, error_response(
+                ErrorCode.COMPANION_UNAVAILABLE,
+                "Companion accessibility service is not ready",
+            )
+        return client, None
+    except CompanionUnavailableError as e:
+        return None, error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))
+
+
 def _sync_ios_state(
     daemon: Any,
     device_id: str | None,
@@ -992,6 +1008,23 @@ def _cmd_companion_status(args: dict, daemon: Any) -> str:
     return ok_response(status)
 
 
+@_register("companion_preflight")
+def _cmd_companion_preflight(args: dict, daemon: Any) -> str:
+    """Run the Android companion preflight checks and return actionable diagnostics."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "companion_preflight is only supported for Android (ADB) devices",
+        )
+    device_id = _get_target_id(args, daemon)
+    from phone_cli.adb.companion_manager import CompanionManager
+
+    manager = CompanionManager(device_id=device_id)
+    status = manager.get_status()
+    return ok_response(status)
+
+
 @_register("companion_setup")
 def _cmd_companion_setup(args: dict, daemon: Any) -> str:
     """Build (if needed), install, enable accessibility, and set up port forwarding."""
@@ -1040,6 +1073,30 @@ def _cmd_find_nodes(args: dict, daemon: Any) -> str:
         return error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))
 
 
+@_register("search_click")
+def _cmd_search_click(args: dict, daemon: Any) -> str:
+    """Search a node via companion and click it in one request."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "search_click is only supported for Android (ADB) devices",
+        )
+    client, err = _companion_client_or_error()
+    if err:
+        return err
+    result = client.search_and_click(
+        text=args.get("text"),
+        text_contains=args.get("text_contains"),
+        resource_id=args.get("resource_id"),
+        class_name=args.get("class_name"),
+        package_name=args.get("package_name"),
+        clickable=args.get("clickable"),
+        index=args.get("index", 0),
+    )
+    return ok_response(result)
+
+
 @_register("click_node")
 def _cmd_click_node(args: dict, daemon: Any) -> str:
     """Click a UI node by nodeId with optional coordinate fallback."""
@@ -1063,6 +1120,34 @@ def _cmd_click_node(args: dict, daemon: Any) -> str:
         return ok_response(result)
     except CompanionUnavailableError as e:
         return error_response(ErrorCode.COMPANION_UNAVAILABLE, str(e))
+
+
+@_register("search_set_text")
+def _cmd_search_set_text(args: dict, daemon: Any) -> str:
+    """Search an input node via companion and set text in one request."""
+    device_type = _get_device_type(daemon)
+    if device_type != "adb":
+        return error_response(
+            ErrorCode.UNSUPPORTED_OPERATION,
+            "search_set_text is only supported for Android (ADB) devices",
+        )
+    text = args.get("text")
+    if text is None:
+        return error_response(ErrorCode.COMMAND_FAILED, "text is required")
+    client, err = _companion_client_or_error()
+    if err:
+        return err
+    result = client.search_and_set_text(
+        text=text,
+        match_text=args.get("match_text"),
+        text_contains=args.get("text_contains"),
+        resource_id=args.get("resource_id"),
+        class_name=args.get("class_name"),
+        package_name=args.get("package_name"),
+        index=args.get("index", 0),
+        use_focused_fallback=args.get("use_focused_fallback", True),
+    )
+    return ok_response(result)
 
 
 @_register("screen_context")

@@ -9,6 +9,9 @@ import com.gamehelper.androidcontrol.model.FindNodesResultDto
 import com.gamehelper.androidcontrol.model.LongPressRequestDto
 import com.gamehelper.androidcontrol.model.NodeActionRequestDto
 import com.gamehelper.androidcontrol.model.NodeQueryDto
+import com.gamehelper.androidcontrol.model.SearchActionResultDto
+import com.gamehelper.androidcontrol.model.SearchAndClickRequestDto
+import com.gamehelper.androidcontrol.model.SearchAndSetTextRequestDto
 import com.gamehelper.androidcontrol.model.ScreenContextDto
 import com.gamehelper.androidcontrol.model.ScreenContextNodeDto
 import com.gamehelper.androidcontrol.model.SetTextRequestDto
@@ -102,6 +105,45 @@ class CompanionHttpServer(
                     Response(200, gson.toJson(mapOf("source" to "companion", "success" to success)))
                 }
 
+                request.method == "POST" && request.path == "/actions/search-click" -> {
+                    val payload = gson.fromJson(request.body, SearchAndClickRequestDto::class.java)
+                    val result = resolveNodeMatch(
+                        query = NodeQueryDto(
+                            text = payload.text,
+                            textContains = payload.textContains,
+                            resourceId = payload.resourceId,
+                            className = payload.className,
+                            packageName = payload.packageName,
+                            clickable = payload.clickable,
+                        ),
+                        index = payload.index,
+                    )
+                    val selected = result.second
+                    val actionResult = if (selected == null) {
+                        SearchActionResultDto(
+                            success = false,
+                            currentPackage = result.first.currentPackage,
+                            totalMatches = result.first.totalMatches,
+                            selectedIndex = payload.index,
+                            selectedNode = null,
+                            action = "search_click",
+                            message = "No matching node found for search-click",
+                        )
+                    } else {
+                        val clicked = nodeActionExecutor.clickResolved(selected)
+                        SearchActionResultDto(
+                            success = clicked,
+                            currentPackage = result.first.currentPackage,
+                            totalMatches = result.first.totalMatches,
+                            selectedIndex = payload.index,
+                            selectedNode = selected,
+                            action = "search_click",
+                            message = if (clicked) null else "Matched node found but click action failed",
+                        )
+                    }
+                    Response(200, gson.toJson(actionResult))
+                }
+
                 request.method == "POST" && request.path == "/actions/set-text" -> {
                     val payload = gson.fromJson(request.body, SetTextRequestDto::class.java)
                     val success = if (payload.nodeId != null) {
@@ -110,6 +152,37 @@ class CompanionHttpServer(
                         nodeActionExecutor.setTextOnFocused(payload.text)
                     }
                     Response(200, gson.toJson(mapOf("success" to success)))
+                }
+
+                request.method == "POST" && request.path == "/actions/search-set-text" -> {
+                    val payload = gson.fromJson(request.body, SearchAndSetTextRequestDto::class.java)
+                    val result = resolveNodeMatch(
+                        query = NodeQueryDto(
+                            text = payload.matchText,
+                            textContains = payload.textContains,
+                            resourceId = payload.resourceId,
+                            className = payload.className,
+                            packageName = payload.packageName,
+                        ),
+                        index = payload.index,
+                    )
+                    val selected = result.second
+                    val success = when {
+                        selected != null -> nodeActionExecutor.setText(selected.nodeId, payload.text)
+                        payload.useFocusedFallback -> nodeActionExecutor.setTextOnFocused(payload.text)
+                        else -> false
+                    }
+                    val actionResult = SearchActionResultDto(
+                        success = success,
+                        currentPackage = result.first.currentPackage,
+                        totalMatches = result.first.totalMatches,
+                        selectedIndex = payload.index,
+                        selectedNode = selected,
+                        action = "search_set_text",
+                        typedText = payload.text,
+                        message = if (success) null else "Unable to set text on matched node or focused input",
+                    )
+                    Response(200, gson.toJson(actionResult))
                 }
 
                 request.method == "POST" && request.path == "/actions/tap" -> {
@@ -204,6 +277,24 @@ class CompanionHttpServer(
 
     private fun hasLabel(node: UiNodeDto): Boolean =
         !node.text.isNullOrBlank() || !node.contentDescription.isNullOrBlank()
+
+    private fun resolveNodeMatch(
+        query: NodeQueryDto,
+        index: Int,
+    ): Pair<FindNodesResultDto, com.gamehelper.androidcontrol.model.FindNodeResultItemDto?> {
+        val snapshot = captureManager.captureWithCache(300) ?: snapshotStore.getSnapshot()
+        val root = snapshot?.root
+        val currentPackage = snapshot?.packageName
+        val nodesById = snapshotStore.getNodesById()
+        if (root == null) {
+            return FindNodesResultDto(
+                currentPackage = currentPackage,
+                totalMatches = 0,
+                nodes = emptyList(),
+            ) to null
+        }
+        return UiNodeQueryEngine.selectMatch(root, query, nodesById, currentPackage, index)
+    }
 
     private fun buildParentHint(nodeId: String, nodesById: Map<String, UiNodeDto>): String? {
         val parts = mutableListOf<String>()

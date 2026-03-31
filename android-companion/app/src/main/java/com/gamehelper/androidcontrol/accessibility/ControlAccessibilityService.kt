@@ -26,27 +26,38 @@ open class ControlAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         CompanionRuntimeState.serviceConnected = true
+        CompanionRuntimeState.startupError = null
 
-        captureManager = HierarchyCaptureManager(this, snapshotStore)
-        gestureExecutor = GestureExecutor(this)
-        nodeActionExecutor = NodeActionExecutor(captureManager, gestureExecutor)
-        webSocketServer = CompanionWebSocketServer(port = 17343)
-        httpServer = CompanionHttpServer(
-            port = 17342,
-            snapshotStore = snapshotStore,
-            captureManager = captureManager,
-            nodeActionExecutor = nodeActionExecutor,
-            gestureExecutor = gestureExecutor,
-            statusProvider = ::buildStatus,
-            webSocketServer = webSocketServer
-        )
+        try {
+            captureManager = HierarchyCaptureManager(this, snapshotStore)
+            gestureExecutor = GestureExecutor(this)
+            nodeActionExecutor = NodeActionExecutor(captureManager, gestureExecutor)
+            webSocketServer = CompanionWebSocketServer(port = 17343)
+            httpServer = CompanionHttpServer(
+                port = 17342,
+                snapshotStore = snapshotStore,
+                captureManager = captureManager,
+                nodeActionExecutor = nodeActionExecutor,
+                gestureExecutor = gestureExecutor,
+                statusProvider = ::buildStatus,
+                webSocketServer = webSocketServer
+            )
 
-        webSocketServer.start()
-        httpServer.start()
-        captureManager.captureLatest()?.also(::updateRuntimeState)
+            webSocketServer.start()
+            CompanionRuntimeState.webSocketServerRunning = true
+            httpServer.start()
+            CompanionRuntimeState.httpServerRunning = true
+            captureManager.captureLatest()?.also(::updateRuntimeState)
 
-        if (CompanionDiagnosticReader(this).isForegroundKeepAliveEnabled()) {
-            CompanionForegroundService.start(this)
+            if (CompanionDiagnosticReader(this).isForegroundKeepAliveEnabled()) {
+                CompanionForegroundService.start(this)
+            }
+        } catch (t: Throwable) {
+            CompanionRuntimeState.startupError = t.javaClass.simpleName + ": " + (t.message ?: "unknown")
+            CompanionRuntimeState.httpServerRunning = false
+            CompanionRuntimeState.webSocketServerRunning = false
+            runCatching { httpServer.stop() }
+            runCatching { webSocketServer.stop() }
         }
     }
 
@@ -69,6 +80,8 @@ open class ControlAccessibilityService : AccessibilityService() {
         runCatching { httpServer.stop() }
         runCatching { webSocketServer.stop() }
         CompanionRuntimeState.serviceConnected = false
+        CompanionRuntimeState.httpServerRunning = false
+        CompanionRuntimeState.webSocketServerRunning = false
         CompanionRuntimeState.lastCaptureAt = null
         CompanionRuntimeState.activePackageName = null
         instance = null
@@ -80,6 +93,10 @@ open class ControlAccessibilityService : AccessibilityService() {
         return CompanionStatusDto(
             ready = snapshot != null,
             serviceConnected = CompanionRuntimeState.serviceConnected,
+            snapshotAvailable = snapshot != null,
+            httpServerRunning = CompanionRuntimeState.httpServerRunning,
+            webSocketServerRunning = CompanionRuntimeState.webSocketServerRunning,
+            startupError = CompanionRuntimeState.startupError,
             lastCaptureAt = snapshot?.capturedAt,
             packageName = snapshot?.packageName
         )

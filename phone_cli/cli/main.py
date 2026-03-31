@@ -395,6 +395,13 @@ def companion_status():
     _print_json(daemon.send_command("companion_status"))
 
 
+@cli.command(name="companion-preflight")
+def companion_preflight():
+    """Run companion preflight checks and return actionable diagnostics (Android-only)."""
+    daemon = _get_daemon()
+    _print_json(daemon.send_command("companion_preflight"))
+
+
 @cli.command(name="companion-setup")
 def companion_setup():
     """Build, install, enable, and set up companion service (Android-only)."""
@@ -425,6 +432,33 @@ def find_nodes(text, text_contains, resource_id, class_name, clickable):
     _print_json(daemon.send_command("find_nodes", args))
 
 
+@cli.command(name="search-click")
+@click.option("--text", default=None, help="Exact text match")
+@click.option("--text-contains", default=None, help="Partial text match")
+@click.option("--resource-id", default=None, help="Resource ID match")
+@click.option("--class-name", default=None, help="Class name match")
+@click.option("--package-name", default=None, help="Package name match")
+@click.option("--clickable", is_flag=True, default=None, help="Only clickable nodes")
+@click.option("--index", default=0, type=int, help="Which matched node to use")
+def search_click(text, text_contains, resource_id, class_name, package_name, clickable, index):
+    """Search a node and click it in one companion round-trip (Android-only)."""
+    daemon = _get_daemon()
+    args = {"index": index}
+    if text is not None:
+        args["text"] = text
+    if text_contains is not None:
+        args["text_contains"] = text_contains
+    if resource_id is not None:
+        args["resource_id"] = resource_id
+    if class_name is not None:
+        args["class_name"] = class_name
+    if package_name is not None:
+        args["package_name"] = package_name
+    if clickable:
+        args["clickable"] = True
+    _print_json(daemon.send_command("search_click", args))
+
+
 @cli.command(name="click-node")
 @click.argument("node_id")
 @click.option("--fallback-x", default=None, type=int, help="Fallback X coordinate")
@@ -438,6 +472,36 @@ def click_node(node_id, fallback_x, fallback_y):
     if fallback_y is not None:
         args["fallback_y"] = fallback_y
     _print_json(daemon.send_command("click_node", args))
+
+
+@cli.command(name="search-set-text")
+@click.argument("text")
+@click.option("--match-text", default=None, help="Exact match for the target input node")
+@click.option("--text-contains", default=None, help="Partial text match for the target input node")
+@click.option("--resource-id", default=None, help="Resource ID match")
+@click.option("--class-name", default=None, help="Class name match")
+@click.option("--package-name", default=None, help="Package name match")
+@click.option("--index", default=0, type=int, help="Which matched node to use")
+@click.option("--no-focused-fallback", is_flag=True, help="Disable fallback to the focused input")
+def search_set_text(text, match_text, text_contains, resource_id, class_name, package_name, index, no_focused_fallback):
+    """Search an input node and set text in one companion round-trip (Android-only)."""
+    daemon = _get_daemon()
+    args = {
+        "text": text,
+        "index": index,
+        "use_focused_fallback": not no_focused_fallback,
+    }
+    if match_text is not None:
+        args["match_text"] = match_text
+    if text_contains is not None:
+        args["text_contains"] = text_contains
+    if resource_id is not None:
+        args["resource_id"] = resource_id
+    if class_name is not None:
+        args["class_name"] = class_name
+    if package_name is not None:
+        args["package_name"] = package_name
+    _print_json(daemon.send_command("search_set_text", args))
 
 
 @cli.command(name="screen-context")

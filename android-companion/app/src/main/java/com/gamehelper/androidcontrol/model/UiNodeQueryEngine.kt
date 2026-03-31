@@ -56,6 +56,18 @@ object UiNodeQueryEngine {
         return ResolvedClickDto("coordinate", null, center)
     }
 
+    fun selectMatch(
+        root: UiNodeDto,
+        query: NodeQueryDto,
+        nodesById: Map<String, UiNodeDto>,
+        currentPackage: String?,
+        index: Int = 0
+    ): Pair<FindNodesResultDto, FindNodeResultItemDto?> {
+        val result = findMatchesEnriched(root, query, nodesById, currentPackage)
+        val selected = result.nodes.getOrNull(index)
+        return result to selected
+    }
+
     private fun computeMatchScore(node: UiNodeDto, query: NodeQueryDto): String {
         return if (query.text != null &&
             (node.text == query.text || node.contentDescription == query.text)

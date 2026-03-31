@@ -1,6 +1,8 @@
 import json
 import os
 import tempfile
+import threading
+import time
 from unittest.mock import MagicMock, patch
 
 from phone_cli.cli.daemon import PhoneCLIDaemon
@@ -67,7 +69,8 @@ def test_daemon_get_command_timeout_extends_wait_for_app():
 
 
 def test_daemon_is_pid_alive_returns_false_for_nonexistent():
-    daemon = PhoneCLIDaemon()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        daemon = PhoneCLIDaemon(home_dir=tmpdir)
     assert daemon._is_pid_alive(99999999) is False
 
 
@@ -217,3 +220,49 @@ def test_daemon_start_ios_explicit_runtime_with_multiple_targets_requires_device
              patch("phone_cli.ios.runtime.discovery.detect_ios_runtimes", return_value=discovery):
             result = daemon.start(device_type="ios", ios_runtime="simulator")
         assert result["error_code"] == "TARGET_NOT_SELECTED"
+
+
+def test_start_heartbeat_refreshes_companion_health_payload():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        daemon = PhoneCLIDaemon(home_dir=tmpdir)
+        initial_state = {
+            "device_type": "adb",
+            "device_id": "dev1",
+            "companion_status": "ready",
+        }
+        daemon._write_state(initial_state)
+
+        stop_called = threading.Event()
+
+        def fake_wait(timeout=None):
+            if stop_called.is_set():
+                return True
+            stop_called.set()
+            return False
+
+        manager = MagicMock()
+        manager.is_port_forwarded.return_value = True
+        manager.get_status.return_value = {
+            "ready": False,
+            "issue_codes": ["HTTP_NOT_READY"],
+            "issues": ["Companion HTTP 服务未就绪"],
+        }
+
+        with patch.object(daemon._stop_event, "wait", side_effect=fake_wait), \
+             patch("phone_cli.adb.list_devices") as mock_devices, \
+             patch("phone_cli.adb.companion_manager.CompanionManager", return_value=manager):
+            mock_device = MagicMock()
+            mock_device.device_id = "dev1"
+            mock_devices.return_value = [mock_device]
+            daemon._start_heartbeat(initial_state)
+            for _ in range(20):
+                state = daemon._read_state()
+                if "device_status" in state:
+                    break
+                time.sleep(0.01)
+
+        state = daemon._read_state()
+        assert state["device_status"] == "connected"
+        assert state["companion_status"] == "degraded"
+        assert state["companion_health"]["issue_codes"] == ["HTTP_NOT_READY"]
+        assert "companion_last_checked_at" in state

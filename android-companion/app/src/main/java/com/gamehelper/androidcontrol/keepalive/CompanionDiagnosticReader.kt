@@ -3,6 +3,7 @@ package com.gamehelper.androidcontrol.keepalive
 import android.content.ComponentName
 import android.content.Context
 import android.provider.Settings
+import com.gamehelper.androidcontrol.keepalive.CompanionRuntimeState
 import java.net.InetSocketAddress
 import java.net.Socket
 

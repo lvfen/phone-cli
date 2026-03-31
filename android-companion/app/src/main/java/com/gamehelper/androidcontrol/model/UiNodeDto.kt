@@ -67,6 +67,27 @@ data class NodeQueryDto(
     val clickable: Boolean? = null
 )
 
+data class SearchAndClickRequestDto(
+    val text: String? = null,
+    val textContains: String? = null,
+    val resourceId: String? = null,
+    val className: String? = null,
+    val packageName: String? = null,
+    val clickable: Boolean? = null,
+    val index: Int = 0
+)
+
+data class SearchAndSetTextRequestDto(
+    val text: String,
+    val matchText: String? = null,
+    val textContains: String? = null,
+    val resourceId: String? = null,
+    val className: String? = null,
+    val packageName: String? = null,
+    val index: Int = 0,
+    val useFocusedFallback: Boolean = true
+)
+
 data class NodeActionRequestDto(
     val deviceId: String? = null,
     val nodeId: String,
@@ -89,6 +110,10 @@ data class SwipeRequestDto(
 data class CompanionStatusDto(
     val ready: Boolean,
     val serviceConnected: Boolean,
+    val snapshotAvailable: Boolean,
+    val httpServerRunning: Boolean,
+    val webSocketServerRunning: Boolean,
+    val startupError: String? = null,
     val lastCaptureAt: String? = null,
     val packageName: String? = null
 )
@@ -121,6 +146,18 @@ data class FindNodesResultDto(
     val currentPackage: String? = null,
     val totalMatches: Int,
     val nodes: List<FindNodeResultItemDto>
+)
+
+data class SearchActionResultDto(
+    val success: Boolean,
+    val source: String = "companion",
+    val currentPackage: String? = null,
+    val totalMatches: Int = 0,
+    val selectedIndex: Int = 0,
+    val selectedNode: FindNodeResultItemDto? = null,
+    val action: String,
+    val typedText: String? = null,
+    val message: String? = null
 )
 
 data class ScreenContextNodeDto(

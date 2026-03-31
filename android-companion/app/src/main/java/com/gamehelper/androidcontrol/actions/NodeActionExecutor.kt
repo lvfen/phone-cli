@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import com.gamehelper.androidcontrol.capture.HierarchyCaptureManager
 import com.gamehelper.androidcontrol.model.FallbackBoundsDto
+import com.gamehelper.androidcontrol.model.FindNodeResultItemDto
 import com.gamehelper.androidcontrol.model.NodeActionRequestDto
 
 class NodeActionExecutor(
@@ -26,6 +27,15 @@ class NodeActionExecutor(
             putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
         }
         return liveNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    fun clickResolved(item: FindNodeResultItemDto): Boolean {
+        val resolved = item.resolvedClick
+        val targetNodeId = resolved.nodeId ?: item.nodeId
+        val liveNode = captureManager.findLiveNodeById(targetNodeId)
+        val clicked = clickLiveNode(liveNode)
+        if (clicked) return true
+        return gestureExecutor.tap(resolved.center.x, resolved.center.y)
     }
 
     fun setTextOnFocused(text: String): Boolean {

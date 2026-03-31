@@ -108,6 +108,49 @@ class TestCompanionClient:
                 body={"text": "hello"},
             )
 
+    def test_search_and_click_builds_correct_query(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True, "action": "search_click"},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.search_and_click(text_contains="动态", clickable=True, index=1)
+            mock_post.assert_called_once_with(
+                "/actions/search-click",
+                body={"index": 1, "textContains": "动态", "clickable": True},
+            )
+            assert result["success"] is True
+
+    def test_search_and_set_text_builds_correct_query(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        with patch.object(
+            CompanionClient,
+            "_post",
+            return_value={"success": True, "action": "search_set_text"},
+        ) as mock_post:
+            client = CompanionClient()
+            result = client.search_and_set_text(
+                text="hello",
+                match_text="请输入",
+                class_name="android.widget.EditText",
+                use_focused_fallback=False,
+            )
+            mock_post.assert_called_once_with(
+                "/actions/search-set-text",
+                body={
+                    "text": "hello",
+                    "index": 0,
+                    "useFocusedFallback": False,
+                    "matchText": "请输入",
+                    "className": "android.widget.EditText",
+                },
+            )
+            assert result["success"] is True
+
     def test_tap(self):
         from phone_cli.adb.companion import CompanionClient
 
@@ -194,20 +237,16 @@ class TestCompanionManager:
         from phone_cli.adb.companion_manager import CompanionManager, COMPANION_SERVICE
 
         mgr = CompanionManager()
-        with patch.object(
-            mgr,
-            "_run_adb",
-            return_value=MagicMock(stdout=COMPANION_SERVICE),
-        ):
+        with patch.object(mgr, "is_accessibility_globally_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True):
             assert mgr.is_accessibility_enabled() is True
 
     def test_is_accessibility_enabled_false(self):
         from phone_cli.adb.companion_manager import CompanionManager
 
         mgr = CompanionManager()
-        with patch.object(
-            mgr, "_run_adb", return_value=MagicMock(stdout="null")
-        ):
+        with patch.object(mgr, "is_accessibility_globally_enabled", return_value=False), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True):
             assert mgr.is_accessibility_enabled() is False
 
     def test_is_port_forwarded_true(self):
@@ -247,21 +286,158 @@ class TestCompanionManager:
         from phone_cli.adb.companion_manager import CompanionManager
 
         mgr = CompanionManager()
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "get_installed_version", return_value="1.0.0"), \
-             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_globally_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True), \
+             patch.object(
+                 mgr,
+                 "get_accessibility_runtime_state",
+                 return_value={
+                     "service_enabled_in_manager": True,
+                     "service_bound": True,
+                     "service_crashed": False,
+                 },
+             ), \
+             patch.object(mgr, "is_companion_process_running", return_value=True), \
              patch.object(mgr, "is_port_forwarded", return_value=True), \
              patch.object(
                  mgr._client,
                  "get_status",
-                 return_value={"ready": True, "serviceConnected": True},
+                 return_value={
+                     "ready": True,
+                     "serviceConnected": True,
+                     "snapshotAvailable": True,
+                     "httpServerRunning": True,
+                     "webSocketServerRunning": True,
+                 },
              ):
             status = mgr.get_status()
             assert status["installed"] is True
             assert status["version"] == "1.0.0"
             assert status["accessibility_enabled"] is True
+            assert status["accessibility_service_bound"] is True
+            assert status["accessibility_service_bound_raw"] is True
             assert status["port_forwarded"] is True
             assert status["service_ready"] is True
+            assert status["runtime_service_connected"] is True
+            assert status["snapshot_available"] is True
+            assert status["http_server_running"] is True
+            assert status["web_socket_server_running"] is True
+            assert status["ready"] is True
+            assert status["issue_codes"] == []
+            assert status["issues"] == []
+
+    def test_get_status_uses_runtime_health_when_dumpsys_bound_is_false(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="test123")
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "get_installed_version", return_value="1.0.0"), \
+             patch.object(mgr, "is_accessibility_globally_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True), \
+             patch.object(
+                 mgr,
+                 "get_accessibility_runtime_state",
+                 return_value={
+                     "service_enabled_in_manager": True,
+                     "service_bound": False,
+                     "service_crashed": False,
+                     "enabled_services_raw": "{service}",
+                     "bound_services_raw": "{}",
+                     "crashed_services_raw": "{}",
+                 },
+             ), \
+             patch.object(mgr, "is_companion_process_running", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(
+                 mgr._client,
+                 "get_status",
+                 return_value={
+                     "ready": True,
+                     "serviceConnected": True,
+                     "snapshotAvailable": True,
+                     "httpServerRunning": True,
+                     "webSocketServerRunning": True,
+                 },
+             ):
+            status = mgr.get_status()
+
+        assert status["accessibility_service_bound"] is True
+        assert status["accessibility_service_bound_raw"] is False
+        assert status["ready"] is True
+        assert status["issues"] == []
+        assert status["diagnostic_notes"]
+
+    def test_get_status_reports_crashed_service(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="test123")
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "get_installed_version", return_value="1.0.0"), \
+             patch.object(mgr, "is_accessibility_globally_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True), \
+             patch.object(
+                 mgr,
+                 "get_accessibility_runtime_state",
+                 return_value={
+                     "service_enabled_in_manager": True,
+                     "service_bound": False,
+                     "service_crashed": True,
+                 },
+             ), \
+             patch.object(mgr, "is_companion_process_running", return_value=False), \
+             patch.object(mgr, "is_port_forwarded", return_value=False):
+            status = mgr.get_status()
+
+        assert status["ready"] is False
+        assert "辅助服务已被系统标记为 crashed" in status["issues"]
+        assert "SERVICE_CRASHED" in status["issue_codes"]
+        assert status["recommended_action"] is not None
+
+    def test_get_status_reports_startup_error(self):
+        from phone_cli.adb.companion_manager import CompanionManager
+
+        mgr = CompanionManager(device_id="test123")
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "get_installed_version", return_value="1.0.0"), \
+             patch.object(mgr, "is_accessibility_globally_enabled", return_value=True), \
+             patch.object(mgr, "is_accessibility_service_enabled", return_value=True), \
+             patch.object(
+                 mgr,
+                 "get_accessibility_runtime_state",
+                 return_value={
+                     "service_enabled_in_manager": True,
+                     "service_bound": True,
+                     "service_crashed": False,
+                     "enabled_services_raw": "{service}",
+                     "bound_services_raw": "{service}",
+                     "crashed_services_raw": "{}",
+                 },
+             ), \
+             patch.object(mgr, "is_companion_process_running", return_value=True), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(
+                 mgr._client,
+                 "get_status",
+                 return_value={
+                     "ready": False,
+                     "serviceConnected": True,
+                     "snapshotAvailable": False,
+                     "httpServerRunning": False,
+                     "webSocketServerRunning": False,
+                     "startupError": "BindException: Address already in use",
+                 },
+             ):
+            status = mgr.get_status()
+
+        assert status["ready"] is False
+        assert status["startup_error"] == "BindException: Address already in use"
+        assert "SERVICE_STARTUP_ERROR" in status["issue_codes"]
 
     def test_adb_prefix_with_device_id(self):
         from phone_cli.adb.companion_manager import CompanionManager
@@ -304,6 +480,22 @@ class TestCompanionCommands:
         parsed = json.loads(result)
         assert parsed["status"] == "ok"
         assert parsed["data"]["installed"] is True
+
+    def test_companion_preflight_adb(self):
+        daemon = self._make_adb_daemon()
+        with patch(
+            "phone_cli.adb.companion_manager.CompanionManager"
+        ) as MockMgr:
+            MockMgr.return_value.get_status.return_value = {
+                "ready": False,
+                "issues": ["辅助服务已被系统标记为 crashed"],
+                "recommended_action": "辅助服务已崩溃，请在手机上关闭后重新启用该无障碍服务，再重新执行 preflight。",
+            }
+            result = dispatch_command("companion_preflight", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["ready"] is False
+        assert parsed["data"]["issues"]
 
     def test_companion_status_ios_rejected(self):
         daemon = self._make_ios_daemon()
@@ -348,6 +540,47 @@ class TestCompanionCommands:
         parsed = json.loads(result)
         assert parsed["status"] == "ok"
         assert parsed["data"]["totalMatches"] == 2
+
+    def test_search_click_success(self):
+        daemon = self._make_adb_daemon()
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            mock_client = MockClient.return_value
+            mock_client.is_ready.return_value = True
+            mock_client.search_and_click.return_value = {
+                "success": True,
+                "action": "search_click",
+                "totalMatches": 1,
+            }
+            result = dispatch_command(
+                "search_click", {"text_contains": "动态", "clickable": True}, daemon
+            )
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["success"] is True
+
+    def test_search_set_text_requires_text(self):
+        daemon = self._make_adb_daemon()
+        result = dispatch_command("search_set_text", {}, daemon)
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == ErrorCode.COMMAND_FAILED
+
+    def test_search_set_text_success(self):
+        daemon = self._make_adb_daemon()
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient:
+            mock_client = MockClient.return_value
+            mock_client.is_ready.return_value = True
+            mock_client.search_and_set_text.return_value = {
+                "success": True,
+                "action": "search_set_text",
+                "typedText": "hello",
+            }
+            result = dispatch_command(
+                "search_set_text", {"text": "hello", "class_name": "android.widget.EditText"}, daemon
+            )
+        parsed = json.loads(result)
+        assert parsed["status"] == "ok"
+        assert parsed["data"]["success"] is True
 
     def test_find_nodes_companion_unavailable(self):
         daemon = self._make_adb_daemon()
@@ -625,21 +858,33 @@ class TestCompanionManagerEnsureReady:
         mgr = CompanionManager(device_id="test123")
         return mgr
 
+    def _healthy_status(self):
+        return {
+            "issues": [],
+            "accessibility_service_bound": True,
+            "accessibility_service_crashed": False,
+            "service_ready": True,
+        }
+
     def test_ensure_ready_full_happy_path(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=True), \
              patch.object(mgr._client, "is_ready", return_value=True):
             result = mgr.ensure_ready()
         assert result["available"] is True
-        assert len(result["steps"]) == 4
+        assert len(result["steps"]) == 5
 
     def test_ensure_ready_installs_when_not_installed(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=False), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=False), \
              patch.object(mgr, "install", return_value={"installed": True}) as mock_install, \
              patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=True), \
              patch.object(mgr._client, "is_ready", return_value=True):
             result = mgr.ensure_ready()
@@ -648,7 +893,8 @@ class TestCompanionManagerEnsureReady:
 
     def test_ensure_ready_install_failure_returns_error(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=False), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=False), \
              patch.object(mgr, "install", side_effect=RuntimeError("disk full")):
             result = mgr.ensure_ready()
         assert result["available"] is False
@@ -656,9 +902,11 @@ class TestCompanionManagerEnsureReady:
 
     def test_ensure_ready_enables_accessibility_when_disabled(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=False), \
              patch.object(mgr, "enable_accessibility", return_value={"enabled": True}) as mock_enable, \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=True), \
              patch.object(mgr._client, "is_ready", return_value=True):
             result = mgr.ensure_ready()
@@ -667,7 +915,8 @@ class TestCompanionManagerEnsureReady:
 
     def test_ensure_ready_accessibility_enable_failure_returns_error(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=False), \
              patch.object(mgr, "enable_accessibility", return_value={
                  "enabled": False, "message": "OEM blocked"
@@ -689,8 +938,10 @@ class TestCompanionManagerEnsureReady:
             call_order.append("is_ready")
             return True
 
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=False), \
              patch.object(mgr, "setup_port_forward", side_effect=mock_setup), \
              patch.object(mgr._client, "is_ready", side_effect=mock_is_ready):
@@ -702,8 +953,10 @@ class TestCompanionManagerEnsureReady:
 
     def test_ensure_ready_port_forward_failure_returns_error(self):
         mgr = self._make_manager()
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=False), \
              patch.object(mgr, "setup_port_forward", side_effect=RuntimeError("port busy")):
             result = mgr.ensure_ready()
@@ -714,8 +967,10 @@ class TestCompanionManagerEnsureReady:
         mgr = self._make_manager()
         ready_calls = [False, False, True]  # Becomes ready on 3rd check
 
-        with patch.object(mgr, "is_installed", return_value=True), \
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
              patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", return_value=self._healthy_status()), \
              patch.object(mgr, "is_port_forwarded", return_value=True), \
              patch.object(mgr._client, "is_ready", side_effect=ready_calls), \
              patch.object(mgr, "_run_adb") as mock_adb, \
