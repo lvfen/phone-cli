@@ -18,9 +18,26 @@ phone-cli 有两层 daemon 架构：
 
 大多数情况使用 per-device-type daemon。
 
-### Android Accessibility-First
+### Android Accessibility-First（强制规则）
 
-Android 下所有手势命令（`tap`、`double-tap`、`long-press`、`swipe`、`back`、`home`、`type`）**默认优先使用 Companion 无障碍服务**，不可用时自动回退到 ADB shell。返回值含 `"source"` 字段。通过 `--type adb` 可强制走 ADB。
+⚠️ **Android 平台所有操作必须优先通过 Companion 无障碍服务执行，这是强制要求，不是建议。**
+
+**强制优先级（不可跳过）：**
+
+| 操作类型 | 优先级 1（必须先尝试） | 优先级 2（仅当优先级 1 失败时） | 优先级 3（最后手段） |
+|---------|---------------------|-------------------------------|---------------------|
+| 手势（tap/swipe/back/home/type 等） | Companion 无障碍服务 | ADB shell (`--type adb`) | — |
+| 页面观察 & 元素定位 | Companion ui-tree (`source: companion`) | uiautomator (`source: uiautomator`) | 截图 (`screenshot`) |
+
+**回退条件：只有以下情况才允许回退到下一优先级：**
+- Companion 返回错误或超时
+- `companion_status` 不是 `"ready"`
+- ui-tree 节点质量持续低（<15% 有 text，连续 3+ 次）
+
+**禁止行为：**
+- ❌ 不得在 companion 可用时主动使用 `--type adb`
+- ❌ 不得在 ui-tree 有效时跳过直接用截图
+- ❌ 不得在未尝试 companion 的情况下直接使用 ADB
 
 ### Platform-Specific Constraints
 
@@ -127,6 +144,35 @@ phone-cli tap 500 300
 phone-cli screenshot --resize 720
 ```
 
+### 每步方案标注（强制）
+
+Android 平台每执行一个操作，**必须在输出中标注该步使用的方案**，格式：
+
+**标注格式：**
+- `[Companion]` — 通过辅助服务执行（绿色通道，正常情况）
+- `[ADB]` — 通过 ADB shell 执行（回退方案，需说明原因）
+- `[Screenshot]` — 通过截图视觉识别（最后手段，需说明原因）
+
+**示例输出：**
+```
+步骤 1: [Companion] 获取 ui-tree，找到"WLAN"按钮 (352, 1395)
+步骤 2: [Companion] tap 点击 WLAN (source: companion)
+步骤 3: [Companion] 获取 ui-tree 验证页面跳转成功
+步骤 4: [Screenshot] 截图确认页面布局（原因：需要视觉确认颜色/图标）
+```
+
+**回退标注示例：**
+```
+步骤 5: [ADB] tap 点击确认按钮 (source: adb) ⚠️ Companion 超时，回退 ADB
+步骤 6: [Screenshot] 截图观察页面 ⚠️ ui-tree 返回 UI_TREE_UNAVAILABLE
+```
+
+**规则：**
+1. 每步必须有 `[Companion]`/`[ADB]`/`[Screenshot]` 前缀标签
+2. 回退时必须附带 ⚠️ 和原因说明
+3. 验证 `phone-cli` 返回的 `source` 字段，确保与标注一致
+4. 如果连续 2+ 步回退为 ADB，主动检查 companion 状态并尝试恢复
+
 ### Observation & Verification
 
 **Android / HarmonyOS 观察策略（Accessibility-First）：**
@@ -135,6 +181,11 @@ phone-cli screenshot --resize 720
 - **定位元素**：通过 text/content-desc 找到按钮、输入框，取 bounds 中心点坐标
 - **验证页面状态**：检查预期文本是否出现、页面标题是否切换、列表内容是否加载
 - **确认操作结果**：输入后检查 editable 节点文本、点击后检查新页面节点
+
+**⚠️ 强制检查 source 字段**：每次调用 `phone-cli ui-tree` 或手势命令后，必须检查返回 JSON 中的 `source` 字段：
+- `source: "companion"` → 正常，继续
+- `source: "uiautomator"` 或 `source: "adb"` → 标注为回退，记录原因
+- 如果预期 companion 但实际回退，运行 `phone-cli status` 检查 `companion_status`
 
 **截图仅在以下场景使用：**
 - 节点质量低（Flutter/游戏/WebView/Canvas —— 多数节点无 text 和有意义的 resource_id）
@@ -168,6 +219,11 @@ Launch subagent via Agent tool: load `prompts/subagent.md`, inject steps and `pr
 ## Step 7: Result Report
 
 - Report step-by-step status and key screenshots
+- **Android 平台必须包含方案统计**：
+  - Companion 执行步数 / 总步数
+  - 回退 ADB 的步骤及原因
+  - 使用截图的步骤及原因
+  - 示例：`方案统计：8/10 步通过 Companion，1 步 ADB（超时），1 步 Screenshot（Flutter 页面）`
 - On failure: analyze cause, ask user to retry or re-plan
 
 ## Command Reference
