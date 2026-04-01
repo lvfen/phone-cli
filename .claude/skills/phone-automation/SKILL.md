@@ -43,7 +43,11 @@ User mentions: phone/mobile operations, app testing, ADB/HDC/iOS commands, mobil
 
 ## Step 2: Startup & Target Selection
 
-Run `phone-cli status`. If running + connected + correct platform, reuse. Otherwise stop and restart.
+Run `phone-cli status`. If running + connected + correct platform:
+- **Android**: 检查返回值中 `companion_status` 字段。如果不是 `"ready"`，运行 `phone-cli companion-setup` 初始化无障碍服务（详见下方第 6 步）
+- 其他平台：直接 reuse
+
+Otherwise stop and restart.
 
 ### Android / HarmonyOS Startup
 
