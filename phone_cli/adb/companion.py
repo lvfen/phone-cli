@@ -223,9 +223,11 @@ class CompanionClient:
         self, x: int, y: int, duration_ms: int = 3000
     ) -> dict[str, Any]:
         """POST /actions/long-press — accessibility gesture long press."""
+        timeout = (duration_ms / 1000) + 3  # gesture duration + margin
         return self._post(
             "/actions/long-press",
             body={"x": x, "y": y, "durationMs": duration_ms},
+            timeout=timeout,
         )
 
     def back(self) -> dict[str, Any]:
@@ -245,6 +247,7 @@ class CompanionClient:
         duration_ms: int = 250,
     ) -> dict[str, Any]:
         """POST /actions/swipe — accessibility gesture swipe."""
+        timeout = max(self.DEFAULT_TIMEOUT, (duration_ms / 1000) + 3)
         return self._post(
             "/actions/swipe",
             body={
@@ -254,6 +257,7 @@ class CompanionClient:
                 "endY": end_y,
                 "durationMs": duration_ms,
             },
+            timeout=timeout,
         )
 
     # ── Screen context ───────────────────────────────────────────────

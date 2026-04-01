@@ -66,7 +66,7 @@ class GestureExecutor(
             null
         )
 
-        latch.await(800, TimeUnit.MILLISECONDS)
+        latch.await(durationMs + 1000, TimeUnit.MILLISECONDS)
         return success
     }
 }
