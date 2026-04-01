@@ -51,7 +51,9 @@ class CompanionForegroundService : Service() {
             ACTION_STOP -> {
                 diagnosticReader.setForegroundKeepAliveEnabled(false)
                 diagnosticReader.setOverlayEnabled(false)
+                stopForegroundCompat()
                 stopSelf()
+                return START_NOT_STICKY
             }
 
             else -> refreshStatus()
@@ -62,6 +64,7 @@ class CompanionForegroundService : Service() {
     override fun onDestroy() {
         handler.removeCallbacks(refreshRunnable)
         overlayController.hide()
+        stopForegroundCompat()
         super.onDestroy()
     }
 
@@ -164,6 +167,15 @@ class CompanionForegroundService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, CompanionForegroundService::class.java))
+        }
+    }
+
+    private fun stopForegroundCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } else {
+            @Suppress("DEPRECATION")
+            stopForeground(true)
         }
     }
 }

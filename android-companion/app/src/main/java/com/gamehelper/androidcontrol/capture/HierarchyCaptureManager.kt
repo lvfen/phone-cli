@@ -85,17 +85,25 @@ class HierarchyCaptureManager(
     }
 
     private fun selectCaptureRoot(windows: List<AccessibilityWindowInfo>): AccessibilityNodeInfo? {
-        val preferredRoot = windows.firstNotNullOfOrNull { window ->
-            val root = window.root ?: return@firstNotNullOfOrNull null
-            if (isCompanionPackage(root.packageName?.toString())) null else root
-        }
-        if (preferredRoot != null) return preferredRoot
+        // Priority 1: Active window (the app currently in foreground)
+        windows.firstOrNull { it.isActive }
+            ?.root?.takeIf { !isCompanionPackage(it.packageName?.toString()) }
+            ?.let { return it }
 
+        // Priority 2: Focused window (has input focus)
+        windows.firstOrNull { it.isFocused }
+            ?.root?.takeIf { !isCompanionPackage(it.packageName?.toString()) }
+            ?.let { return it }
+
+        // Priority 3: rootInActiveWindow from the service
         val activeRoot = service.rootInActiveWindow
-        return if (activeRoot != null && !isCompanionPackage(activeRoot.packageName?.toString())) {
-            activeRoot
-        } else {
-            null
+        if (activeRoot != null && !isCompanionPackage(activeRoot.packageName?.toString())) {
+            return activeRoot
+        }
+
+        // Priority 4: First valid non-companion window (fallback)
+        return windows.firstNotNullOfOrNull { window ->
+            window.root?.takeIf { !isCompanionPackage(it.packageName?.toString()) }
         }
     }
 
