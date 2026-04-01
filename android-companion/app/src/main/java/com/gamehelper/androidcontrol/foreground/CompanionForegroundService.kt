@@ -16,14 +16,16 @@ import androidx.core.content.ContextCompat
 import com.gamehelper.androidcontrol.MainActivity
 import com.gamehelper.androidcontrol.R
 import com.gamehelper.androidcontrol.keepalive.CompanionDiagnosticReader
+import com.gamehelper.androidcontrol.overlay.CompanionOverlayController
 
 class CompanionForegroundService : Service() {
 
     private val handler = Handler(Looper.getMainLooper())
     private val diagnosticReader by lazy { CompanionDiagnosticReader(this) }
+    private val overlayController by lazy { CompanionOverlayController(this, diagnosticReader) }
     private val refreshRunnable = object : Runnable {
         override fun run() {
-            updateNotification()
+            refreshStatus()
             handler.postDelayed(this, REFRESH_INTERVAL_MS)
         }
     }
@@ -40,6 +42,7 @@ class CompanionForegroundService : Service() {
         } else {
             startForeground(NOTIFICATION_ID, buildNotification())
         }
+        refreshStatus()
         handler.post(refreshRunnable)
     }
 
@@ -47,46 +50,60 @@ class CompanionForegroundService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 diagnosticReader.setForegroundKeepAliveEnabled(false)
+                diagnosticReader.setOverlayEnabled(false)
                 stopSelf()
             }
 
-            else -> updateNotification()
+            else -> refreshStatus()
         }
         return START_STICKY
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(refreshRunnable)
+        overlayController.hide()
         super.onDestroy()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    private fun updateNotification() {
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification())
+    private fun refreshStatus() {
+        val snapshot = diagnosticReader.snapshot()
+        overlayController.sync(snapshot)
+        updateNotification(diagnosticReader.snapshot())
     }
 
-    private fun buildNotification() = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun updateNotification(snapshot: com.gamehelper.androidcontrol.keepalive.DiagnosticSnapshot) {
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, buildNotification(snapshot))
+    }
+
+    private fun buildNotification() = buildNotification(diagnosticReader.snapshot())
+
+    private fun buildNotification(snapshot: com.gamehelper.androidcontrol.keepalive.DiagnosticSnapshot) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_sync)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
         .setContentTitle(getString(R.string.keepalive_notification_title))
-        .setContentText(
-            diagnosticReader.run {
-                val snapshot = snapshot()
-                ServiceText.formatStatusLine(snapshot.primaryIssue, snapshot.activePackageName)
-            }
-        )
+        .setContentText(ServiceText.formatStatusLine(snapshot.primaryIssue, snapshot.activePackageName))
         .setStyle(
             NotificationCompat.BigTextStyle().bigText(
-                diagnosticReader.run {
-                    val snapshot = snapshot()
-                    val detail = ServiceText.formatDetailLine(
-                        status = snapshot.primaryIssue,
-                        lastCaptureAt = snapshot.lastCaptureAt
+                buildString {
+                    append(
+                        ServiceText.formatDetailLine(
+                            status = snapshot.primaryIssue,
+                            lastCaptureAt = snapshot.lastCaptureAt
+                        )
                     )
-                    "$detail\n${ServiceText.formatKeepAliveLine(snapshot.foregroundServiceEnabled, snapshot.ignoringBatteryOptimizations)}"
+                    append('\n')
+                    append(
+                        ServiceText.formatKeepAliveLine(
+                            foregroundEnabled = snapshot.foregroundServiceEnabled,
+                            ignoringBatteryOptimizations = snapshot.ignoringBatteryOptimizations,
+                            overlayEnabled = snapshot.overlayEnabled,
+                            overlayVisible = snapshot.overlayVisible
+                        )
+                    )
                 }
             )
         )
@@ -168,9 +185,19 @@ private object ServiceText {
         return "$status  最近抓取：$captureText"
     }
 
-    fun formatKeepAliveLine(foregroundEnabled: Boolean, ignoringBatteryOptimizations: Boolean): String {
+    fun formatKeepAliveLine(
+        foregroundEnabled: Boolean,
+        ignoringBatteryOptimizations: Boolean,
+        overlayEnabled: Boolean,
+        overlayVisible: Boolean
+    ): String {
         val notificationState = if (foregroundEnabled) "已开启" else "已关闭"
         val batteryState = if (ignoringBatteryOptimizations) "已豁免" else "未豁免"
-        return "常驻通知：$notificationState，电池优化：$batteryState"
+        val overlayState = when {
+            !overlayEnabled -> "未开启"
+            overlayVisible -> "显示中"
+            else -> "未显示"
+        }
+        return "常驻通知：$notificationState，电池优化：$batteryState，悬浮窗：$overlayState"
     }
 }

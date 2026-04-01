@@ -8,6 +8,9 @@ data class DiagnosticInput(
     val ignoringBatteryOptimizations: Boolean,
     val httpPortReachable: Boolean,
     val webSocketPortReachable: Boolean,
+    val overlayEnabled: Boolean,
+    val overlayPermissionGranted: Boolean,
+    val overlayVisible: Boolean,
     val lastCaptureAt: String? = null,
     val activePackageName: String? = null
 )
@@ -20,6 +23,9 @@ data class DiagnosticSnapshot(
     val ignoringBatteryOptimizations: Boolean,
     val httpPortReachable: Boolean,
     val webSocketPortReachable: Boolean,
+    val overlayEnabled: Boolean,
+    val overlayPermissionGranted: Boolean,
+    val overlayVisible: Boolean,
     val lastCaptureAt: String?,
     val activePackageName: String?,
     val companionReady: Boolean,
@@ -37,6 +43,9 @@ class ServiceHealthMonitor {
             input.httpPortReachable &&
             input.webSocketPortReachable
 
+        val overlayHealthy = !input.overlayEnabled ||
+            (input.overlayPermissionGranted && input.overlayVisible)
+
         val details = buildList {
             if (!input.accessibilityEnabled) add("系统无障碍总开关关闭")
             if (!input.serviceEnabled) add("辅助服务未出现在已启用服务列表中")
@@ -45,6 +54,8 @@ class ServiceHealthMonitor {
             if (!input.webSocketPortReachable) add("WebSocket 端口 17343 未监听")
             if (!input.foregroundServiceEnabled) add("常驻通知保活未开启")
             if (!input.ignoringBatteryOptimizations) add("未加入电池优化白名单")
+            if (input.overlayEnabled && !input.overlayPermissionGranted) add("悬浮窗权限未授权")
+            if (input.overlayEnabled && input.overlayPermissionGranted && !input.overlayVisible) add("悬浮窗未显示，可能被系统回收")
         }
 
         val issueCode = when {
@@ -52,6 +63,7 @@ class ServiceHealthMonitor {
             !input.serviceEnabled -> "SERVICE_NOT_ENABLED"
             !input.serviceConnected -> "SERVICE_NOT_CONNECTED"
             !input.httpPortReachable || !input.webSocketPortReachable -> "LOCAL_SERVER_UNREACHABLE"
+            !overlayHealthy -> "OVERLAY_INCOMPLETE"
             !input.foregroundServiceEnabled || !input.ignoringBatteryOptimizations -> "KEEPALIVE_INCOMPLETE"
             else -> "READY"
         }
@@ -61,6 +73,7 @@ class ServiceHealthMonitor {
             "SERVICE_NOT_ENABLED" -> "请启用 Select to Speak 无障碍服务。"
             "SERVICE_NOT_CONNECTED" -> "无障碍服务未连接，请重新启用。"
             "LOCAL_SERVER_UNREACHABLE" -> "本地桥接异常，请重启辅助服务。"
+            "OVERLAY_INCOMPLETE" -> "悬浮窗保活未生效，请检查权限或显示状态。"
             "KEEPALIVE_INCOMPLETE" -> "保活配置未完成。"
             else -> "助手就绪。"
         }
@@ -73,6 +86,9 @@ class ServiceHealthMonitor {
             ignoringBatteryOptimizations = input.ignoringBatteryOptimizations,
             httpPortReachable = input.httpPortReachable,
             webSocketPortReachable = input.webSocketPortReachable,
+            overlayEnabled = input.overlayEnabled,
+            overlayPermissionGranted = input.overlayPermissionGranted,
+            overlayVisible = input.overlayVisible,
             lastCaptureAt = input.lastCaptureAt,
             activePackageName = input.activePackageName,
             companionReady = ready,
@@ -89,6 +105,9 @@ class ServiceHealthMonitor {
             }
             !snapshot.foregroundServiceEnabled || !snapshot.ignoringBatteryOptimizations -> {
                 "保活配置未完成"
+            }
+            snapshot.overlayEnabled && (!snapshot.overlayPermissionGranted || !snapshot.overlayVisible) -> {
+                "悬浮窗异常"
             }
             else -> snapshot.primaryIssue.removeSuffix("。")
         }

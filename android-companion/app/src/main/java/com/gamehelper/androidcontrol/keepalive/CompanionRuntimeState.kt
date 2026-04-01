@@ -18,4 +18,10 @@ object CompanionRuntimeState {
 
     @Volatile
     var activePackageName: String? = null
+
+    @Volatile
+    var overlayVisible: Boolean = false
+
+    @Volatile
+    var overlayPermissionGranted: Boolean = false
 }

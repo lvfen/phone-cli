@@ -12,7 +12,7 @@ class BootReceiver : BroadcastReceiver() {
         if (!SUPPORTED_ACTIONS.contains(intent.action)) return
 
         val diagnosticReader = CompanionDiagnosticReader(context)
-        if (diagnosticReader.isForegroundKeepAliveEnabled()) {
+        if (diagnosticReader.isForegroundKeepAliveEnabled() || diagnosticReader.isOverlayEnabled()) {
             CompanionForegroundService.start(context)
         }
     }

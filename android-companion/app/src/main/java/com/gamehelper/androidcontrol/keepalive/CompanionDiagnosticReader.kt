@@ -3,19 +3,21 @@ package com.gamehelper.androidcontrol.keepalive
 import android.content.ComponentName
 import android.content.Context
 import android.provider.Settings
-import com.gamehelper.androidcontrol.keepalive.CompanionRuntimeState
 import java.net.InetSocketAddress
 import java.net.Socket
 
 class CompanionDiagnosticReader(
     private val context: Context,
     private val monitor: ServiceHealthMonitor = ServiceHealthMonitor(),
-    private val batteryOptimizationHelper: BatteryOptimizationHelper = BatteryOptimizationHelper(context)
+    private val batteryOptimizationHelper: BatteryOptimizationHelper = BatteryOptimizationHelper(context),
+    private val overlayPermissionHelper: OverlayPermissionHelper = OverlayPermissionHelper(context)
 ) {
 
     fun snapshot(): DiagnosticSnapshot {
         val httpReachable = CompanionRuntimeState.httpServerRunning || isLoopbackPortReachable(17342)
         val webSocketReachable = CompanionRuntimeState.webSocketServerRunning || isLoopbackPortReachable(17343)
+        val overlayPermissionGranted = overlayPermissionHelper.canDrawOverlays()
+        CompanionRuntimeState.overlayPermissionGranted = overlayPermissionGranted
 
         return monitor.evaluate(
             DiagnosticInput(
@@ -26,6 +28,9 @@ class CompanionDiagnosticReader(
                 ignoringBatteryOptimizations = batteryOptimizationHelper.isIgnoringBatteryOptimizations(),
                 httpPortReachable = httpReachable,
                 webSocketPortReachable = webSocketReachable,
+                overlayEnabled = isOverlayEnabled(),
+                overlayPermissionGranted = overlayPermissionGranted,
+                overlayVisible = CompanionRuntimeState.overlayVisible,
                 lastCaptureAt = CompanionRuntimeState.lastCaptureAt,
                 activePackageName = CompanionRuntimeState.activePackageName
             )
@@ -41,6 +46,37 @@ class CompanionDiagnosticReader(
         context.getSharedPreferences(KeepAlivePreferences.NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KeepAlivePreferences.KEY_FOREGROUND_SERVICE_ENABLED, enabled)
+            .apply()
+    }
+
+    fun isOverlayEnabled(): Boolean {
+        return context.getSharedPreferences(KeepAlivePreferences.NAME, Context.MODE_PRIVATE)
+            .getBoolean(KeepAlivePreferences.KEY_OVERLAY_ENABLED, false)
+    }
+
+    fun setOverlayEnabled(enabled: Boolean) {
+        context.getSharedPreferences(KeepAlivePreferences.NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KeepAlivePreferences.KEY_OVERLAY_ENABLED, enabled)
+            .apply()
+    }
+
+    fun loadOverlayPosition(): Pair<Int, Int>? {
+        val preferences = context.getSharedPreferences(KeepAlivePreferences.NAME, Context.MODE_PRIVATE)
+        if (!preferences.contains(KeepAlivePreferences.KEY_OVERLAY_X) ||
+            !preferences.contains(KeepAlivePreferences.KEY_OVERLAY_Y)
+        ) {
+            return null
+        }
+        return preferences.getInt(KeepAlivePreferences.KEY_OVERLAY_X, 0) to
+            preferences.getInt(KeepAlivePreferences.KEY_OVERLAY_Y, 0)
+    }
+
+    fun saveOverlayPosition(x: Int, y: Int) {
+        context.getSharedPreferences(KeepAlivePreferences.NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KeepAlivePreferences.KEY_OVERLAY_X, x)
+            .putInt(KeepAlivePreferences.KEY_OVERLAY_Y, y)
             .apply()
     }
 

@@ -19,7 +19,10 @@ class ServiceHealthMonitorTest {
                 foregroundServiceEnabled = false,
                 ignoringBatteryOptimizations = false,
                 httpPortReachable = false,
-                webSocketPortReachable = false
+                webSocketPortReachable = false,
+                overlayEnabled = false,
+                overlayPermissionGranted = false,
+                overlayVisible = false
             )
         )
 
@@ -38,6 +41,9 @@ class ServiceHealthMonitorTest {
                 ignoringBatteryOptimizations = true,
                 httpPortReachable = true,
                 webSocketPortReachable = true,
+                overlayEnabled = true,
+                overlayPermissionGranted = true,
+                overlayVisible = true,
                 lastCaptureAt = "2026-03-20T10:02:06Z",
                 activePackageName = "com.android.settings"
             )
@@ -58,7 +64,10 @@ class ServiceHealthMonitorTest {
                 foregroundServiceEnabled = false,
                 ignoringBatteryOptimizations = false,
                 httpPortReachable = true,
-                webSocketPortReachable = false
+                webSocketPortReachable = false,
+                overlayEnabled = false,
+                overlayPermissionGranted = false,
+                overlayVisible = false
             )
         )
 
@@ -76,10 +85,35 @@ class ServiceHealthMonitorTest {
                 ignoringBatteryOptimizations = true,
                 httpPortReachable = false,
                 webSocketPortReachable = true,
+                overlayEnabled = false,
+                overlayPermissionGranted = false,
+                overlayVisible = false,
             )
         )
 
         assertEquals("LOCAL_SERVER_UNREACHABLE", snapshot.issueCode)
         assertTrue(snapshot.details.contains("HTTP 端口 17342 未监听"))
+    }
+
+    @Test
+    fun evaluateReportsOverlayIssueWhenOverlayEnabledButHidden() {
+        val snapshot = monitor.evaluate(
+            DiagnosticInput(
+                accessibilityEnabled = true,
+                serviceEnabled = true,
+                serviceConnected = true,
+                foregroundServiceEnabled = true,
+                ignoringBatteryOptimizations = true,
+                httpPortReachable = true,
+                webSocketPortReachable = true,
+                overlayEnabled = true,
+                overlayPermissionGranted = true,
+                overlayVisible = false,
+            )
+        )
+
+        assertEquals("OVERLAY_INCOMPLETE", snapshot.issueCode)
+        assertEquals("悬浮窗异常", monitor.notificationStatus(snapshot))
+        assertTrue(snapshot.details.contains("悬浮窗未显示，可能被系统回收"))
     }
 }

@@ -4,11 +4,19 @@
     <string name="service_name">Select to Speak</string>
     <string name="service_description">为 GameHelper 控制 MCP 提供无障碍快照和节点操作能力。</string>
     <string name="main_instructions">请依次开启无障碍服务、常驻通知和电池优化白名单，确保后台稳定运行。</string>
+    <string name="hero_badge">通用桥接诊断</string>
+    <string name="hero_title">桥接状态总览</string>
+    <string name="hero_subtitle">优先使用无障碍能力执行通用动作，异常时即时回报详细诊断，并支持轻量悬浮窗保活。</string>
+    <string name="section_status_title">当前状态</string>
+    <string name="section_actions_title">常用操作</string>
+    <string name="section_details_title">诊断细节</string>
 
     <string name="action_open_accessibility_settings">打开无障碍设置</string>
     <string name="action_refresh_status">刷新状态</string>
     <string name="action_start_keepalive">开启常驻通知</string>
     <string name="action_stop_keepalive">关闭常驻通知</string>
+    <string name="action_enable_overlay">开启悬浮窗保活</string>
+    <string name="action_disable_overlay">关闭悬浮窗保活</string>
     <string name="action_request_battery_optimization_whitelist">申请忽略电池优化</string>
     <string name="action_open_battery_optimization_settings">打开电池优化设置</string>
     <string name="action_open_rom_keepalive_guide">查看 ROM 保活指南</string>
@@ -16,6 +24,9 @@
     <string name="message_cannot_open_battery_optimization_request">无法打开电池优化请求页面。</string>
     <string name="message_cannot_open_battery_optimization_settings">无法打开电池优化设置。</string>
     <string name="message_notification_permission_denied">通知权限被拒绝，常驻通知未启动。</string>
+    <string name="message_overlay_requires_notification">悬浮窗保活依赖常驻通知，关闭前请先关闭悬浮窗。</string>
+    <string name="message_overlay_permission_denied">悬浮窗权限未开启，无法显示保活球。</string>
+    <string name="message_cannot_open_overlay_settings">无法打开悬浮窗权限设置。</string>
 
     <string name="keepalive_notification_channel_name">保活通知</string>
     <string name="keepalive_notification_channel_description">显示无障碍桥接状态，保持进程前台可见。</string>
@@ -27,22 +38,29 @@
 
     <!-- 诊断状态文案 -->
     <string name="status_summary">概览：%s</string>
-    <string name="status_accessibility">无障碍：全局=%s，服务=%s</string>
+    <string name="status_accessibility">无障碍：全局=%1$s，服务=%2$s</string>
     <string name="status_service_connected">服务连接：%s</string>
     <string name="status_keepalive">常驻通知：%s</string>
+    <string name="status_overlay">悬浮窗保活：开关=%1$s，权限=%2$s，显示=%3$s</string>
     <string name="status_battery">电池优化白名单：%s</string>
-    <string name="status_ports">本地端口：17342=%s，17343=%s</string>
+    <string name="status_ports">本地端口：17342=%1$s，17343=%2$s</string>
     <string name="status_capture">最近抓取：%1$s  |  当前包名：%2$s</string>
+    <string name="status_detail_prefix">诊断细节：%s</string>
+    <string name="status_detail_empty">诊断细节：当前没有额外异常信息。</string>
     <string name="yes">是</string>
     <string name="no">否</string>
     <string name="none">无</string>
     <string name="unknown">未知</string>
+    <string name="state_good">正常</string>
+    <string name="state_warning">需关注</string>
+    <string name="state_error">异常</string>
 
     <!-- ServiceHealthMonitor 诊断消息 -->
     <string name="issue_accessibility_disabled">请先打开系统无障碍总开关。</string>
     <string name="issue_service_disabled">请启用 Select to Speak 无障碍服务。</string>
     <string name="issue_service_disconnected">无障碍服务未连接，请重新启用。</string>
     <string name="issue_bridge_down">本地桥接异常，请重启辅助服务。</string>
+    <string name="issue_overlay_incomplete">悬浮窗保活未生效，请检查权限或显示状态。</string>
     <string name="issue_keepalive_incomplete">保活配置未完成。</string>
     <string name="issue_ready">助手就绪。</string>
 
@@ -56,4 +74,8 @@
     <string name="notif_off">已关闭</string>
     <string name="notif_granted">已豁免</string>
     <string name="notif_missing">未豁免</string>
+
+    <string name="overlay_label_ready">稳</string>
+    <string name="overlay_label_warning">保</string>
+    <string name="overlay_label_error">异</string>
 </resources>
