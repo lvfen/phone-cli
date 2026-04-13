@@ -3,8 +3,10 @@
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
+import subprocess
 import threading
 import time
 from datetime import datetime
@@ -690,6 +692,194 @@ class PhoneCLIDaemon:
 
         return False
 
+    def _list_adb_devices(self, adb_path: str) -> list[dict[str, str]]:
+        """List adb devices with their current status."""
+        result = subprocess.run(
+            [adb_path, "devices"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip() or "adb devices failed"
+            raise RuntimeError(stderr)
+
+        devices = []
+        for line in result.stdout.strip().splitlines()[1:]:
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            devices.append({"device_id": parts[0], "status": parts[1]})
+        return devices
+
+    def _probe_adb_device(self, adb_path: str, device_id: str) -> bool:
+        """Return True when the given adb device can answer shell commands."""
+        try:
+            result = subprocess.run(
+                [adb_path, "-s", device_id, "shell", "getprop", "sys.boot_completed"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _list_processes(self) -> list[tuple[int, str]]:
+        """List local processes as (pid, command)."""
+        result = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        processes: list[tuple[int, str]] = []
+        for line in result.stdout.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            parts = stripped.split(None, 1)
+            if len(parts) != 2:
+                continue
+            pid_text, command = parts
+            try:
+                processes.append((int(pid_text), command))
+            except ValueError:
+                continue
+        return processes
+
+    def _find_adb_processes(self) -> list[int]:
+        """Find adb server-related processes to kill during recovery."""
+        pids: list[int] = []
+        for pid, command in self._list_processes():
+            parts = command.split()
+            if not parts:
+                continue
+            executable = os.path.basename(parts[0])
+            if executable != "adb":
+                continue
+            if pid == os.getpid():
+                continue
+            pids.append(pid)
+        return pids
+
+    def _list_running_emulators(self) -> list[dict[str, Any]]:
+        """Return running Android emulator processes."""
+        emulators: list[dict[str, Any]] = []
+        for pid, command in self._list_processes():
+            parts = command.split()
+            if not parts:
+                continue
+            executable = os.path.basename(parts[0])
+            if executable != "emulator":
+                continue
+
+            avd_name = None
+            if "-avd" in parts:
+                index = parts.index("-avd")
+                if index + 1 < len(parts):
+                    avd_name = parts[index + 1]
+
+            emulators.append(
+                {
+                    "pid": pid,
+                    "command": command,
+                    "avd_name": avd_name,
+                }
+            )
+        return emulators
+
+    def _kill_processes(self, pids: list[int]) -> list[int]:
+        """Kill processes best-effort and return the killed PIDs."""
+        killed: list[int] = []
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+                killed.append(pid)
+            except ProcessLookupError:
+                continue
+            except PermissionError:
+                continue
+        if killed:
+            time.sleep(1)
+        return killed
+
+    def _restart_adb_server(self, adb_path: str) -> None:
+        """Recover a hung adb server by killing stale processes then restarting."""
+        stale_pids = self._find_adb_processes()
+        if stale_pids:
+            self._kill_processes(stale_pids)
+
+        subprocess.run(
+            [adb_path, "kill-server"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        result = subprocess.run(
+            [adb_path, "start-server"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip() or result.stdout.strip() or "adb start-server failed"
+            raise RuntimeError(stderr)
+
+    def _list_available_avds(self, emulator_bin: str) -> list[str]:
+        """List available Android emulator AVD names."""
+        result = subprocess.run(
+            [emulator_bin, "-list-avds"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            return []
+        return [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+
+    def _launch_emulator(self, emulator_bin: str, emulator_dir: str, avd_name: str) -> None:
+        """Launch the Android emulator in the recommended mode."""
+        subprocess.Popen(
+            [emulator_bin, "-avd", avd_name, "-no-audio", "-no-boot-anim"],
+            cwd=emulator_dir,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _wait_for_emulator_boot(self, adb_path: str, timeout_seconds: int = 120) -> str | None:
+        """Wait until an emulator is connected and fully booted."""
+        deadline = time.time() + timeout_seconds
+        while time.time() < deadline:
+            try:
+                devices = self._list_adb_devices(adb_path)
+            except Exception:
+                time.sleep(2)
+                continue
+
+            for device in devices:
+                device_id = device["device_id"]
+                if not device_id.startswith("emulator-") or device["status"] != "device":
+                    continue
+
+                result = subprocess.run(
+                    [adb_path, "-s", device_id, "shell", "getprop", "sys.boot_completed"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout.strip() == "1":
+                    return device_id
+            time.sleep(2)
+        return None
+
     def _resolve_adb_device(self, state: dict[str, Any]) -> dict[str, Any] | None:
         """Check ADB devices; auto-start emulator if none connected.
 
@@ -697,31 +887,44 @@ class PhoneCLIDaemon:
         or *None* when ``state`` already has a usable device (possibly
         after launching an emulator).
         """
-        import shutil
-        import subprocess
-        import time
-
         adb_path = shutil.which("adb") or "adb"
+        preferred_avd = os.environ.get("PHONE_CLI_ANDROID_AVD")
 
-        # --- 1. Check for connected devices -----------------------------------
         try:
-            result = subprocess.run(
-                [adb_path, "devices"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            lines = [
-                line
-                for line in result.stdout.strip().splitlines()[1:]
-                if line.strip() and "device" in line
-            ]
-            if lines:
-                return None  # device(s) present, proceed normally
-        except Exception:
-            pass  # adb not found or failed — try emulator path below
+            devices = self._list_adb_devices(adb_path)
+        except Exception as exc:
+            try:
+                self._restart_adb_server(adb_path)
+                devices = self._list_adb_devices(adb_path)
+            except Exception as restart_exc:
+                return self._error_result(
+                    ErrorCode.NO_ADB_DEVICE,
+                    f"ADB 无响应，重启后仍不可用：{restart_exc or exc}",
+                )
 
-        # --- 2. No device — try to find and start an emulator -----------------
+        physical_devices = [
+            device
+            for device in devices
+            if device["status"] == "device" and not device["device_id"].startswith("emulator-")
+        ]
+        if physical_devices:
+            if len(physical_devices) == 1:
+                state["device_id"] = physical_devices[0]["device_id"]
+                state["target_id"] = physical_devices[0]["device_id"]
+            return None
+
+        responsive_emulators = [
+            device
+            for device in devices
+            if device["device_id"].startswith("emulator-")
+            and device["status"] == "device"
+            and self._probe_adb_device(adb_path, device["device_id"])
+        ]
+        if responsive_emulators:
+            state["device_id"] = responsive_emulators[0]["device_id"]
+            state["target_id"] = responsive_emulators[0]["device_id"]
+            return None
+
         android_home = os.environ.get("ANDROID_HOME") or os.environ.get(
             "ANDROID_SDK_ROOT"
         )
@@ -739,18 +942,7 @@ class PhoneCLIDaemon:
                 f"No ADB device connected and emulator binary not found at {emulator_bin}.",
             )
 
-        # List available AVDs
-        try:
-            avd_result = subprocess.run(
-                [emulator_bin, "-list-avds"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            avds = [line.strip() for line in avd_result.stdout.strip().splitlines() if line.strip()]
-        except Exception:
-            avds = []
-
+        avds = self._list_available_avds(emulator_bin)
         if not avds:
             return self._error_result(
                 ErrorCode.NO_ADB_DEVICE,
@@ -758,43 +950,45 @@ class PhoneCLIDaemon:
                 "Connect a device or create an AVD first.",
             )
 
-        # Pick the first AVD (most common single-AVD setup)
-        avd_name = avds[0]
+        running_emulators = self._list_running_emulators()
+        running_avd_names = [
+            emulator["avd_name"]
+            for emulator in running_emulators
+            if emulator.get("avd_name")
+        ]
+        avd_name = preferred_avd or (running_avd_names[0] if running_avd_names else avds[0])
+        if avd_name not in avds:
+            return self._error_result(
+                ErrorCode.EMULATOR_START_FAILED,
+                f"Requested emulator AVD '{avd_name}' is not available.",
+            )
 
-        # Launch emulator from the SDK emulator directory (required for path resolution)
+        if running_emulators:
+            self._kill_processes([emulator["pid"] for emulator in running_emulators])
+            try:
+                self._restart_adb_server(adb_path)
+            except Exception:
+                pass
+
         emulator_dir = os.path.join(android_home, "emulator")
         try:
-            subprocess.Popen(
-                [emulator_bin, "-avd", avd_name, "-no-audio", "-no-boot-anim"],
-                cwd=emulator_dir,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            self._launch_emulator(emulator_bin, emulator_dir, avd_name)
         except Exception as e:
             return self._error_result(
                 ErrorCode.EMULATOR_START_FAILED,
                 f"Failed to start emulator AVD '{avd_name}': {e}",
             )
 
-        # Wait for device to appear (up to 60s)
-        for _ in range(30):
-            time.sleep(2)
-            try:
-                result = subprocess.run(
-                    [adb_path, "shell", "getprop", "sys.boot_completed"],
-                    capture_output=True,
-                    text=True,
-                    timeout=5,
-                )
-                if result.stdout.strip() == "1":
-                    state["emulator_avd"] = avd_name
-                    return None  # emulator booted, proceed
-            except Exception:
-                continue
+        emulator_device_id = self._wait_for_emulator_boot(adb_path, timeout_seconds=120)
+        if emulator_device_id:
+            state["emulator_avd"] = avd_name
+            state["device_id"] = emulator_device_id
+            state["target_id"] = emulator_device_id
+            return None
 
         return self._error_result(
             ErrorCode.EMULATOR_START_FAILED,
-            f"Emulator AVD '{avd_name}' started but did not boot within 60 seconds.",
+            f"Emulator AVD '{avd_name}' started but did not boot within 120 seconds.",
         )
 
     def _error_result(self, error_code: str, error_msg: str) -> dict[str, Any]:

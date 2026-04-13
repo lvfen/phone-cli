@@ -236,6 +236,7 @@ def test_start_heartbeat_refreshes_companion_health_payload():
 
         def fake_wait(timeout=None):
             if stop_called.is_set():
+                daemon._stop_event.set()
                 return True
             stop_called.set()
             return False
@@ -266,3 +267,82 @@ def test_start_heartbeat_refreshes_companion_health_payload():
         assert state["companion_status"] == "degraded"
         assert state["companion_health"]["issue_codes"] == ["HTTP_NOT_READY"]
         assert "companion_last_checked_at" in state
+
+
+def test_resolve_adb_device_restarts_hung_adb_server():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        daemon = PhoneCLIDaemon(home_dir=tmpdir)
+        state = {}
+
+        with patch("phone_cli.cli.daemon.shutil.which", return_value="/usr/bin/adb"), \
+             patch.object(
+                 daemon,
+                 "_list_adb_devices",
+                 side_effect=[
+                     RuntimeError("adb timeout"),
+                     [{"device_id": "device-123", "status": "device"}],
+                 ],
+             ), \
+             patch.object(daemon, "_restart_adb_server") as mock_restart:
+            result = daemon._resolve_adb_device(state)
+
+        assert result is None
+        mock_restart.assert_called_once_with("/usr/bin/adb")
+        assert state["device_id"] == "device-123"
+        assert state["target_id"] == "device-123"
+
+
+def test_resolve_adb_device_reuses_responsive_emulator():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        daemon = PhoneCLIDaemon(home_dir=tmpdir)
+        state = {}
+
+        with patch("phone_cli.cli.daemon.shutil.which", return_value="/usr/bin/adb"), \
+             patch.object(
+                 daemon,
+                 "_list_adb_devices",
+                 return_value=[{"device_id": "emulator-5554", "status": "device"}],
+             ), \
+             patch.object(daemon, "_probe_adb_device", return_value=True) as mock_probe, \
+             patch.object(daemon, "_list_running_emulators") as mock_emulators:
+            result = daemon._resolve_adb_device(state)
+
+        assert result is None
+        mock_probe.assert_called_once_with("/usr/bin/adb", "emulator-5554")
+        mock_emulators.assert_not_called()
+        assert state["device_id"] == "emulator-5554"
+        assert state["target_id"] == "emulator-5554"
+
+
+def test_resolve_adb_device_restarts_unresponsive_emulator():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        daemon = PhoneCLIDaemon(home_dir=tmpdir)
+        state = {}
+
+        with patch.dict(os.environ, {"ANDROID_HOME": "/sdk"}, clear=False), \
+             patch("phone_cli.cli.daemon.shutil.which", return_value="/usr/bin/adb"), \
+             patch("phone_cli.cli.daemon.os.path.isfile", return_value=True), \
+             patch.object(
+                 daemon,
+                 "_list_adb_devices",
+                 return_value=[{"device_id": "emulator-5554", "status": "offline"}],
+             ), \
+             patch.object(daemon, "_list_available_avds", return_value=["Pixel_9"]), \
+             patch.object(
+                 daemon,
+                 "_list_running_emulators",
+                 return_value=[{"pid": 4321, "avd_name": "Pixel_9"}],
+             ), \
+             patch.object(daemon, "_kill_processes") as mock_kill, \
+             patch.object(daemon, "_restart_adb_server") as mock_restart, \
+             patch.object(daemon, "_launch_emulator") as mock_launch, \
+             patch.object(daemon, "_wait_for_emulator_boot", return_value="emulator-5556"):
+            result = daemon._resolve_adb_device(state)
+
+        assert result is None
+        mock_kill.assert_called_once_with([4321])
+        mock_restart.assert_called_once_with("/usr/bin/adb")
+        mock_launch.assert_called_once_with("/sdk/emulator/emulator", "/sdk/emulator", "Pixel_9")
+        assert state["emulator_avd"] == "Pixel_9"
+        assert state["device_id"] == "emulator-5556"
+        assert state["target_id"] == "emulator-5556"

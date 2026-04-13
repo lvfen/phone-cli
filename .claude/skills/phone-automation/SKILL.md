@@ -68,15 +68,14 @@ Otherwise stop and restart.
 
 ### Android / HarmonyOS Startup
 
-1. **检查设备连接**：`adb devices`（Android）或 `hdc list targets`（HarmonyOS）
-2. **有设备** → `phone-cli stop` → `phone-cli start --device-type adb|hdc` → wait 2s → `phone-cli status`
-3. **无设备**（Android）→ 自动尝试启动模拟器：
-   - `emulator -list-avds` 查看可用 AVD
-   - 有 AVD → 仅一个自动选，多个问用户 → 按 "Emulator Auto-Start" 启动
-   - 无 AVD → 告知用户无设备和模拟器，建议连接真机或创建 AVD
-4. **无设备**（HarmonyOS）→ 告知用户无设备，建议检查连接
-5. ADB 端口冲突：`lsof -i :5037`，kill stale process，retry
-6. **（Android）初始化 Companion 无障碍服务**：daemon 启动成功后，运行 `phone-cli companion-setup`
+1. **Android 必须优先运行启动脚本**：
+   - `python3 .claude/skills/phone-automation/scripts/android_startup.py`
+   - 如需指定模拟器：`PHONE_CLI_ANDROID_AVD="<avd>" python3 .claude/skills/phone-automation/scripts/android_startup.py`
+   - 这个脚本会一次性完成：检查 `adb devices`、ADB 无响应时 kill 现有 ADB 进程并重启 server、无真机时检查模拟器是否已启动且可响应、无响应则杀掉模拟器并重启、未启动则自动拉起模拟器、最后启动 `phone-cli` daemon 并尝试 `companion-setup`
+   - **除非脚本明确失败或需要用户选择 AVD，否则不要让 AI 手动逐条执行 `adb devices` / `adb kill-server` / `emulator -list-avds` / `phone-cli start`**
+2. **HarmonyOS**：`hdc list targets` → 有设备则 `phone-cli stop` → `phone-cli start --device-type hdc` → `phone-cli status`
+3. **无设备**（HarmonyOS）→ 告知用户无设备，建议检查连接
+4. **（Android）初始化 Companion 无障碍服务**：脚本默认会在 daemon 启动后尝试 `phone-cli companion-setup`
    - 完整流程：检查 APK 是否存在 → 不存在则编译（`gradlew assembleDebug`，需 ANDROID_HOME + Java 17+）→ 安装到设备 → 启用无障碍权限 → 建立端口转发
    - **首次运行**会触发 Gradle 编译，耗时 1-3 分钟，后续运行 APK 已存在直接安装
    - 返回 `"available": true` → Companion 就绪，后续手势/ui-tree 自动走无障碍服务
@@ -100,6 +99,8 @@ Otherwise stop and restart.
 - iOS: already bound from detect-runtimes; switch via `phone-cli set-device <ID>`
 
 ### Emulator Auto-Start
+
+默认由 `scripts/android_startup.py` 负责，不要手动展开。只有在脚本失败且需要人工兜底时才使用下面流程：
 
 1. `emulator -list-avds`, ask user which AVD
 2. **Always** `cd $ANDROID_HOME/emulator && ./emulator -avd <name> -no-audio -no-boot-anim`
