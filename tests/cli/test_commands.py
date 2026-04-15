@@ -92,11 +92,25 @@ def test_dispatch_devices_ios_includes_runtime_fields():
 
 def test_dispatch_set_device():
     mock_daemon = MagicMock()
-    mock_daemon._read_state.return_value = {"device_type": "adb"}
+    state = {"device_type": "adb", "target_id": "emulator-5554"}
+    mock_daemon._read_state.return_value = state
     result = dispatch_command("set_device", {"device_id": "dev1"}, mock_daemon)
     parsed = json.loads(result)
     assert parsed["status"] == "ok"
+    assert parsed["data"]["device_id"] == "dev1"
+    assert parsed["data"]["target_id"] == "dev1"
     mock_daemon._write_state.assert_called_once()
+
+
+def test_dispatch_set_device_ios_keeps_target_id_in_sync():
+    mock_daemon = MagicMock()
+    state = {"device_type": "ios", "target_id": "sim-1"}
+    mock_daemon._read_state.return_value = state
+    result = dispatch_command("set_device", {"device_id": "dev1"}, mock_daemon)
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    assert parsed["data"]["device_id"] == "dev1"
+    assert parsed["data"]["target_id"] == "dev1"
 
 
 def test_dispatch_device_info():

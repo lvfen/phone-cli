@@ -293,6 +293,10 @@ def _cmd_set_device(args: dict, daemon: Any) -> str:
     state["device_id"] = device_id
     if state.get("device_type") == "ios":
         state["target_id"] = device_id
+    else:
+        # Android / HarmonyOS should not keep a stale target_id from
+        # a previously selected emulator or legacy state.
+        state["target_id"] = device_id
     daemon._write_state(state)
     return ok_response({
         "device_id": state.get("device_id"),
