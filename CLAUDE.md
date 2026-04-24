@@ -21,6 +21,14 @@ phone_cli/
 
 ## Dev Commands
 
+**Important Rule**: 
+`phone-cli` operates on a client-daemon architecture. **Whenever you modify the Python source code** of `phone-cli` (e.g. `phone_cli/adb/device.py`, etc.), the daemon holding the older code in memory will NOT automatically reload. You **MUST restart the daemon** (`phone-cli stop && phone-cli start --device-type <platform>`) before testing your changes!
+
+```bash
+# Restart daemon to apply code changes
+phone-cli stop && phone-cli start --device-type adb # or hdc / ios
+```
+
 ```bash
 # Run unit tests
 pytest tests/cli/ -v --ignore=tests/cli/test_e2e.py
