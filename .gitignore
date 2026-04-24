@@ -10,8 +10,15 @@ build/
 
 # Virtual environments
 .venv/
+.venv311/
 venv/
 env/
+
+# Local build/cache caches (keep out of repo even when present in workspace)
+.gradle-home/
+
+# Local secrets / project-scoped MCP config (contains tokens)
+.mcp.json
 
 # IDE
 .idea/
