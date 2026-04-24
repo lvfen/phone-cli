@@ -41,7 +41,26 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
     adb_prefix = _get_adb_prefix(device_id)
 
     try:
-        # Execute screenshot command
+        # Fast path: stream screenshot bytes directly to host.
+        result = subprocess.run(
+            adb_prefix + ["exec-out", "screencap", "-p"],
+            capture_output=True,
+            timeout=timeout,
+        )
+        image_bytes = result.stdout or b""
+        output_text = ((result.stdout or b"") + (result.stderr or b"")).decode(
+            "utf-8",
+            errors="replace",
+        )
+
+        # Check for screenshot failure (sensitive screen)
+        if "Status: -1" in output_text or "Failed" in output_text:
+            return _create_fallback_screenshot(is_sensitive=True)
+
+        if image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+            return _build_screenshot_from_bytes(image_bytes)
+
+        # Fallback: write to device then pull to host.
         result = subprocess.run(
             adb_prefix + ["shell", "screencap", "-p", "/sdcard/tmp.png"],
             capture_output=True,
@@ -49,12 +68,10 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
             timeout=timeout,
         )
 
-        # Check for screenshot failure (sensitive screen)
         output = result.stdout + result.stderr
         if "Status: -1" in output or "Failed" in output:
             return _create_fallback_screenshot(is_sensitive=True)
 
-        # Pull screenshot to local temp path
         subprocess.run(
             adb_prefix + ["pull", "/sdcard/tmp.png", temp_path],
             capture_output=True,
@@ -65,20 +82,11 @@ def get_screenshot(device_id: str | None = None, timeout: int = 10) -> Screensho
         if not os.path.exists(temp_path):
             return _create_fallback_screenshot(is_sensitive=False)
 
-        # Read and encode image
-        img = Image.open(temp_path)
-        width, height = img.size
+        with open(temp_path, "rb") as f:
+            file_bytes = f.read()
 
-        buffered = BytesIO()
-        img.save(buffered, format="PNG")
-        base64_data = base64.b64encode(buffered.getvalue()).decode("utf-8")
-
-        # Cleanup
         os.remove(temp_path)
-
-        return Screenshot(
-            base64_data=base64_data, width=width, height=height, is_sensitive=False
-        )
+        return _build_screenshot_from_bytes(file_bytes)
 
     except Exception as e:
         print(f"Screenshot error: {e}")
@@ -90,6 +98,19 @@ def _get_adb_prefix(device_id: str | None) -> list:
     if device_id:
         return ["adb", "-s", device_id]
     return ["adb"]
+
+
+def _build_screenshot_from_bytes(image_bytes: bytes) -> Screenshot:
+    """Build a screenshot object from PNG bytes without re-encoding."""
+    img = Image.open(BytesIO(image_bytes))
+    width, height = img.size
+    base64_data = base64.b64encode(image_bytes).decode("utf-8")
+    return Screenshot(
+        base64_data=base64_data,
+        width=width,
+        height=height,
+        is_sensitive=False,
+    )
 
 
 def _create_fallback_screenshot(is_sensitive: bool) -> Screenshot:
