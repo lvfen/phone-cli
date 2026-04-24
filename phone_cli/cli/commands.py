@@ -536,8 +536,13 @@ def _cmd_launch(args: dict, daemon: Any) -> str:
     app_name = args.get("app_name")
     bundle_id = args.get("bundle_id")
     app_path = args.get("app_path")
-    if not any([app_name, bundle_id, app_path]):
-        return error_response(ErrorCode.COMMAND_FAILED, "app_name, bundle_id, or app_path is required")
+    package_name = args.get("package_name")
+    activity_name = args.get("activity_name")
+    if not any([app_name, bundle_id, app_path, package_name]):
+        return error_response(
+            ErrorCode.COMMAND_FAILED,
+            "app_name, bundle_id, app_path, or package_name is required",
+        )
 
     device_id = _get_target_id(args, daemon)
     device_type = _get_device_type(daemon)
@@ -556,9 +561,11 @@ def _cmd_launch(args: dict, daemon: Any) -> str:
             "launch_app",
             app_name or "",
             device_id=device_id,
+            package_name=package_name,
+            activity_name=activity_name,
         )
     if not success:
-        app_identifier = bundle_id or app_path or app_name or "<unknown>"
+        app_identifier = bundle_id or app_path or package_name or app_name or "<unknown>"
         return error_response(ErrorCode.APP_NOT_FOUND, f"App not found: {app_identifier}")
     if device_type == "ios":
         _sync_ios_state(daemon, device_id, bundle_id=bundle_id)
@@ -567,6 +574,8 @@ def _cmd_launch(args: dict, daemon: Any) -> str:
             "app_name": app_name,
             "bundle_id": bundle_id,
             "app_path": app_path,
+            "package_name": package_name,
+            "activity_name": activity_name,
         }
     )
 
@@ -634,10 +643,13 @@ def _ui_tree_adb(device_id: str | None) -> str:
         adb_prefix = ["adb", "-s", device_id]
 
     # Dump UI hierarchy
-    subprocess.run(
+    dump_result = subprocess.run(
         adb_prefix + ["shell", "uiautomator", "dump", "/sdcard/ui_dump.xml"],
         capture_output=True, text=True, timeout=10,
     )
+
+    if dump_result.returncode != 0:
+        return error_response(ErrorCode.UI_TREE_UNAVAILABLE, "Failed to dump UI tree")
 
     # Read the dump
     result = subprocess.run(

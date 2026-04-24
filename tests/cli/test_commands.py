@@ -262,6 +262,28 @@ def test_dispatch_launch():
     assert parsed["status"] == "ok"
 
 
+def test_dispatch_launch_android_with_package_and_activity():
+    mock_daemon = MagicMock()
+    mock_daemon._read_state.return_value = {"device_type": "adb", "device_id": "dev1"}
+    with patch("phone_cli.adb.launch_app", return_value=True) as mock_launch:
+        result = dispatch_command(
+            "launch",
+            {
+                "package_name": "com.example.app",
+                "activity_name": "com.example.app.MainActivity",
+            },
+            mock_daemon,
+        )
+    parsed = json.loads(result)
+    assert parsed["status"] == "ok"
+    mock_launch.assert_called_once_with(
+        "",
+        device_id="dev1",
+        package_name="com.example.app",
+        activity_name="com.example.app.MainActivity",
+    )
+
+
 def test_dispatch_launch_ios_with_bundle_id():
     mock_daemon = MagicMock()
     mock_daemon._read_state.return_value = {

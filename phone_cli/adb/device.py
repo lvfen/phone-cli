@@ -9,6 +9,17 @@ from typing import List, Optional, Tuple
 from phone_cli.config.apps import APP_PACKAGES
 from phone_cli.config.timing import TIMING_CONFIG
 
+LAUNCHER_BLACKLIST_KEYWORDS = (
+    "leakcanary",
+    "leaklauncher",
+    "heapdump",
+    "dokit",
+    "diagnostic",
+    "diagnostics",
+    "debugtool",
+    "mati",
+)
+
 
 def get_screen_size(device_id: str | None = None, timeout: int = 5) -> Tuple[int, int]:
     """
@@ -45,13 +56,20 @@ def get_current_app(device_id: str | None = None) -> str:
         device_id: Optional ADB device ID for multi-device setups.
 
     Returns:
-        The app name if recognized, otherwise "System Home".
+        The known app name, raw package name, or "System Home" as fallback.
     """
     adb_prefix = _get_adb_prefix(device_id)
 
-    result = subprocess.run(
-        adb_prefix + ["shell", "dumpsys", "window"], capture_output=True, text=True, encoding="utf-8"
-    )
+    try:
+        result = subprocess.run(
+            adb_prefix + ["shell", "dumpsys", "window"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return "System Home"
     output = result.stdout
     if not output:
         raise ValueError("No output from dumpsys window")
@@ -62,6 +80,9 @@ def get_current_app(device_id: str | None = None) -> str:
             for app_name, package in APP_PACKAGES.items():
                 if package in line:
                     return app_name
+            match = re.search(r"([A-Za-z0-9._]+)/(?:[A-Za-z0-9_.$]+)", line)
+            if match:
+                return match.group(1)
 
     return "System Home"
 
@@ -234,15 +255,21 @@ def home(device_id: str | None = None, delay: float | None = None) -> None:
 
 
 def launch_app(
-    app_name: str, device_id: str | None = None, delay: float | None = None
+    app_name: str,
+    device_id: str | None = None,
+    delay: float | None = None,
+    package_name: str | None = None,
+    activity_name: str | None = None,
 ) -> bool:
     """
     Launch an app by name.
 
     Args:
-        app_name: The app name (must be in APP_PACKAGES).
+        app_name: The app name (must be in APP_PACKAGES) or an Android package.
         device_id: Optional ADB device ID.
         delay: Delay in seconds after launching. If None, uses configured default.
+        package_name: Explicit Android package name.
+        activity_name: Explicit Android activity name.
 
     Returns:
         True if app was launched, False if app not found.
@@ -250,25 +277,45 @@ def launch_app(
     if delay is None:
         delay = TIMING_CONFIG.device.default_launch_delay
 
-    if app_name not in APP_PACKAGES:
+    package = _resolve_package_name(app_name, package_name)
+    if not package:
         return False
 
     adb_prefix = _get_adb_prefix(device_id)
-    package = APP_PACKAGES[app_name]
-
-    subprocess.run(
-        adb_prefix
-        + [
-            "shell",
-            "monkey",
-            "-p",
-            package,
-            "-c",
-            "android.intent.category.LAUNCHER",
-            "1",
-        ],
-        capture_output=True,
-    )
+    if activity_name:
+        _start_activity(adb_prefix, package, activity_name)
+    else:
+        ranked_candidates = _rank_launcher_activities(
+            _query_launcher_activities(package, device_id=device_id),
+            package_name=package,
+        )
+        candidates = [
+            candidate
+            for candidate in ranked_candidates
+            if not _is_auxiliary_activity(candidate, package_name=package)
+        ] or ranked_candidates[:1]
+        if candidates:
+            for index, candidate in enumerate(candidates):
+                _start_activity(adb_prefix, package, candidate)
+                state = get_app_state(package=package, device_id=device_id)
+                if not _is_auxiliary_activity(state.get("activity"), package_name=package):
+                    break
+                if index == len(candidates) - 1:
+                    break
+        else:
+            subprocess.run(
+                adb_prefix
+                + [
+                    "shell",
+                    "monkey",
+                    "-p",
+                    package,
+                    "-c",
+                    "android.intent.category.LAUNCHER",
+                    "1",
+                ],
+                capture_output=True,
+            )
     time.sleep(delay)
     return True
 
@@ -542,11 +589,13 @@ def get_app_log(
         logcat_cmd += [f"--pid={pid}"]
 
     result = subprocess.run(
-        logcat_cmd,
-        capture_output=True, text=True, encoding="utf-8", timeout=15,
+        logcat_cmd + ["-t", str(max(lines * 5, 100))],
+        capture_output=True,
+        timeout=15,
     )
+    stdout = (result.stdout or b"").decode("utf-8", errors="replace")
 
-    log_lines = result.stdout.split("\n") if result.stdout else []
+    log_lines = stdout.split("\n") if stdout else []
 
     # Apply filter
     if filter_type == "crash":
@@ -683,6 +732,153 @@ def _get_adb_prefix(device_id: str | None) -> list:
     if device_id:
         return ["adb", "-s", device_id]
     return ["adb"]
+
+
+def _resolve_package_name(app_name: str | None, package_name: str | None = None) -> str | None:
+    """Resolve a launchable Android package from explicit package or app name."""
+    if package_name:
+        return package_name
+    if not app_name:
+        return None
+    if app_name in APP_PACKAGES:
+        return APP_PACKAGES[app_name]
+    if _looks_like_package_name(app_name):
+        return app_name
+    return None
+
+
+def _looks_like_package_name(value: str) -> bool:
+    """Return whether the value resembles an Android package name."""
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+", value))
+
+
+def _query_launcher_activities(package_name: str, device_id: str | None = None) -> list[str]:
+    """Query launcher activities for a package."""
+    adb_prefix = _get_adb_prefix(device_id)
+    result = subprocess.run(
+        adb_prefix
+        + [
+            "shell",
+            "cmd",
+            "package",
+            "query-activities",
+            "--brief",
+            "--components",
+            "-a",
+            "android.intent.action.MAIN",
+            "-c",
+            "android.intent.category.LAUNCHER",
+            package_name,
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return []
+
+    return _parse_launcher_query_output(result.stdout, package_name)
+
+
+def _rank_launcher_activities(activities: list[str], package_name: str) -> list[str]:
+    """Order launcher candidates by how likely they are to be the real app entry."""
+    def _score(activity: str) -> tuple[int, int, str]:
+        class_name = _extract_activity_class(package_name, activity)
+        normalized = class_name.lower()
+        blacklist_hits = sum(
+            1 for keyword in LAUNCHER_BLACKLIST_KEYWORDS if keyword in normalized
+        )
+        preferred_bonus = 0
+        if "mainactivity" in normalized:
+            preferred_bonus -= 4
+        elif re.search(r"(^|[.$])main([.$]|$)", normalized):
+            preferred_bonus -= 3
+        elif "welcome" in normalized:
+            preferred_bonus -= 2
+        elif "launcher" in normalized or "home" in normalized or "splash" in normalized:
+            preferred_bonus -= 1
+        return (blacklist_hits, preferred_bonus, activity)
+
+    return sorted(activities, key=_score)
+
+
+def _build_activity_component(package_name: str, activity_name: str) -> str:
+    """Build a fully qualified am start component string."""
+    if "/" in activity_name:
+        return activity_name
+    if activity_name.startswith("."):
+        return f"{package_name}/{activity_name}"
+    if activity_name == package_name or activity_name.startswith(package_name + "."):
+        return f"{package_name}/{activity_name}"
+    return f"{package_name}/{activity_name}"
+
+
+def _start_activity(adb_prefix: list[str], package_name: str, activity_name: str) -> None:
+    """Start a specific activity component."""
+    subprocess.run(
+        adb_prefix + ["shell", "am", "start", "-n", _build_activity_component(package_name, activity_name)],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+
+def _extract_activity_class(package_name: str, activity_name: str) -> str:
+    """Extract a fully qualified activity class name from a component or class string."""
+    if "/" in activity_name:
+        _, class_name = activity_name.split("/", 1)
+    else:
+        class_name = activity_name
+    if class_name.startswith("."):
+        return f"{package_name}{class_name}"
+    return class_name
+
+
+def _is_auxiliary_activity(activity_name: str | None, package_name: str) -> bool:
+    """Heuristic for whether the resumed activity is likely an auxiliary/debug entry."""
+    if not activity_name or activity_name == "unknown":
+        return False
+    class_name = _extract_activity_class(package_name, activity_name)
+    normalized = class_name.lower()
+    return any(keyword in normalized for keyword in LAUNCHER_BLACKLIST_KEYWORDS)
+
+
+def _parse_launcher_query_output(output: str, package_name: str) -> list[str]:
+    """Parse query-activities output, supporting both brief and detailed formats."""
+    activities: list[str] = []
+    in_activity_info = False
+    pending_name: str | None = None
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if "/" in line and "=" not in line:
+            if line.startswith(package_name + "/"):
+                activities.append(line)
+            continue
+        if line == "ActivityInfo:":
+            in_activity_info = True
+            pending_name = None
+            continue
+        if line == "ApplicationInfo:":
+            in_activity_info = False
+            pending_name = None
+            continue
+        if not in_activity_info:
+            continue
+        if line.startswith("name="):
+            pending_name = line.split("=", 1)[1]
+            continue
+        if line.startswith("packageName=") and pending_name:
+            declared_package = line.split("=", 1)[1]
+            if declared_package == package_name:
+                activities.append(_build_activity_component(package_name, pending_name))
+            pending_name = None
+            in_activity_info = False
+
+    return activities
 
 
 def _parse_wm_size(output: str) -> Tuple[int, int]:

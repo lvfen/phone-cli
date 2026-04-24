@@ -139,3 +139,33 @@ def test_cli_start_rejects_mismatched_instance():
     )
     assert result.exit_code != 0
     assert "--instance must match start --device-type" in result.output
+
+
+def test_cli_launch_passes_android_package_and_activity():
+    runner = CliRunner()
+    with patch("phone_cli.cli.main.PhoneCLIDaemon") as mock_daemon_cls:
+        daemon = mock_daemon_cls.return_value
+        daemon.send_command.return_value = json.dumps(
+            {"status": "ok", "data": {"package_name": "com.example.app"}}
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "launch",
+                "--package",
+                "com.example.app",
+                "--activity",
+                "com.example.app.MainActivity",
+            ],
+        )
+    assert result.exit_code == 0
+    daemon.send_command.assert_called_once_with(
+        "launch",
+        {
+            "app_name": None,
+            "bundle_id": None,
+            "app_path": None,
+            "package_name": "com.example.app",
+            "activity_name": "com.example.app.MainActivity",
+        },
+    )

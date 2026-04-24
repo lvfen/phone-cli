@@ -254,13 +254,17 @@ def home(input_type):
 @click.argument("app_name", required=False)
 @click.option("--bundle-id", default=None, help="Launch by bundle identifier")
 @click.option("--app-path", default=None, type=click.Path(exists=True), help="Launch by .app path")
-def launch(app_name, bundle_id, app_path):
+@click.option("--package", "package_name", default=None, help="Launch Android app by package name")
+@click.option("--activity", "activity_name", default=None, help="Launch Android app by explicit activity name")
+def launch(app_name, bundle_id, app_path, package_name, activity_name):
     """Launch an app by name, bundle ID, or .app path."""
     daemon = _get_daemon()
     args = {
         "app_name": app_name,
         "bundle_id": bundle_id,
         "app_path": os.path.abspath(app_path) if app_path else None,
+        "package_name": package_name,
+        "activity_name": activity_name,
     }
     _print_json(daemon.send_command("launch", args))
 
