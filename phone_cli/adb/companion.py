@@ -1,6 +1,7 @@
 """HTTP client for Android Companion accessibility service."""
 
 import json
+import time
 import urllib.request
 import urllib.error
 from typing import Any
@@ -22,6 +23,13 @@ class CompanionClient:
     DEFAULT_PORT = 17342
     DEFAULT_TIMEOUT = 3
     UI_TREE_TIMEOUT = 5
+    # Gestures (tap/double_tap) can block on a busy device because the
+    # accessibility framework may delay its result callback. The companion's
+    # internal latch now waits up to gesture_duration + 5s, so the HTTP
+    # client must give it headroom to avoid spurious fallbacks to ADB.
+    GESTURE_TIMEOUT = 8
+    READY_CACHE_TTL = 1.0
+    _ready_cache: dict[str, tuple[bool, float]] = {}
 
     def __init__(
         self,
@@ -84,11 +92,20 @@ class CompanionClient:
 
     def is_ready(self) -> bool:
         """Quick check whether the companion service is ready."""
+        now = time.monotonic()
+        cache_key = self._base_url
+        cached = self.__class__._ready_cache.get(cache_key)
+        if cached is not None:
+            ready, cached_at = cached
+            if (now - cached_at) < self.READY_CACHE_TTL:
+                return ready
         try:
             status = self.get_status()
-            return bool(status.get("ready"))
+            ready = bool(status.get("ready"))
         except CompanionUnavailableError:
-            return False
+            ready = False
+        self.__class__._ready_cache[cache_key] = (ready, now)
+        return ready
 
     # ── UI Tree ──────────────────────────────────────────────────────
 
@@ -208,15 +225,23 @@ class CompanionClient:
 
     def tap(self, x: int, y: int) -> dict[str, Any]:
         """POST /actions/tap — accessibility gesture tap."""
-        return self._post("/actions/tap", body={"x": x, "y": y})
+        return self._post(
+            "/actions/tap",
+            body={"x": x, "y": y},
+            timeout=self.GESTURE_TIMEOUT,
+        )
 
     def double_tap(
         self, x: int, y: int, interval_ms: int = 100
     ) -> dict[str, Any]:
         """POST /actions/double-tap — accessibility gesture double tap."""
+        # Double tap dispatches two sequential gestures, so give roughly
+        # twice the single-gesture budget plus the interval.
+        timeout = (self.GESTURE_TIMEOUT * 2) + (interval_ms / 1000.0)
         return self._post(
             "/actions/double-tap",
             body={"x": x, "y": y, "intervalMs": interval_ms},
+            timeout=timeout,
         )
 
     def long_press(

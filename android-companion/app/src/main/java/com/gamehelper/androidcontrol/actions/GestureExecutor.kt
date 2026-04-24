@@ -5,6 +5,7 @@ import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class GestureExecutor(
     private val service: AccessibilityService
@@ -12,7 +13,7 @@ class GestureExecutor(
 
     fun tap(x: Int, y: Int): Boolean {
         val path = Path().apply { moveTo(x.toFloat(), y.toFloat()) }
-        return dispatch(path, 1L)
+        return dispatch(path, TAP_DURATION_MS)
     }
 
     fun doubleTap(x: Int, y: Int, intervalMs: Long = 100): Boolean {
@@ -45,7 +46,7 @@ class GestureExecutor(
 
     private fun dispatch(path: Path, durationMs: Long): Boolean {
         val latch = CountDownLatch(1)
-        var success = false
+        val success = AtomicBoolean(false)
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0L, durationMs))
             .build()
@@ -54,19 +55,29 @@ class GestureExecutor(
             gesture,
             object : AccessibilityService.GestureResultCallback() {
                 override fun onCompleted(gestureDescription: GestureDescription?) {
-                    success = true
+                    success.set(true)
                     latch.countDown()
                 }
 
                 override fun onCancelled(gestureDescription: GestureDescription?) {
-                    success = false
+                    success.set(false)
                     latch.countDown()
                 }
             },
             null
         )
 
-        latch.await(durationMs + 1000, TimeUnit.MILLISECONDS)
-        return success
+        // On busy devices (e.g. Huawei EMUI running games/Flutter), the
+        // accessibility framework can delay the result callback well beyond
+        // the gesture's nominal duration. Give the callback a generous 5s
+        // budget on top of the gesture duration so short taps don't get
+        // reported as failures and force-fallback to ADB.
+        latch.await(durationMs + CALLBACK_BUDGET_MS, TimeUnit.MILLISECONDS)
+        return success.get()
+    }
+
+    companion object {
+        private const val TAP_DURATION_MS: Long = 60L
+        private const val CALLBACK_BUDGET_MS: Long = 5000L
     }
 }

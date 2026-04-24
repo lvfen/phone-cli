@@ -12,9 +12,16 @@ from phone_cli.cli.output import ErrorCode
 class TestCompanionClient:
     """Tests for the CompanionClient HTTP client."""
 
+    @staticmethod
+    def _reset_ready_cache() -> None:
+        from phone_cli.adb.companion import CompanionClient
+
+        CompanionClient._ready_cache.clear()
+
     def test_is_ready_returns_true_when_service_ready(self):
         from phone_cli.adb.companion import CompanionClient
 
+        self._reset_ready_cache()
         with patch.object(CompanionClient, "get_status", return_value={"ready": True}):
             client = CompanionClient()
             assert client.is_ready() is True
@@ -22,6 +29,7 @@ class TestCompanionClient:
     def test_is_ready_returns_false_when_service_not_ready(self):
         from phone_cli.adb.companion import CompanionClient
 
+        self._reset_ready_cache()
         with patch.object(
             CompanionClient, "get_status", return_value={"ready": False}
         ):
@@ -34,6 +42,7 @@ class TestCompanionClient:
             CompanionUnavailableError,
         )
 
+        self._reset_ready_cache()
         with patch.object(
             CompanionClient,
             "get_status",
@@ -41,6 +50,33 @@ class TestCompanionClient:
         ):
             client = CompanionClient()
             assert client.is_ready() is False
+
+    def test_is_ready_uses_short_ttl_cache(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        self._reset_ready_cache()
+        with patch.object(CompanionClient, "get_status", return_value={"ready": True}) as mock_status, \
+             patch("phone_cli.adb.companion.time.monotonic", side_effect=[10.0, 10.2]):
+            first_client = CompanionClient()
+            second_client = CompanionClient()
+            assert first_client.is_ready() is True
+            assert second_client.is_ready() is True
+        assert mock_status.call_count == 1
+
+    def test_is_ready_cache_is_scoped_per_endpoint(self):
+        from phone_cli.adb.companion import CompanionClient
+
+        self._reset_ready_cache()
+        with patch.object(
+            CompanionClient,
+            "get_status",
+            side_effect=[{"ready": True}, {"ready": False}],
+        ) as mock_status, patch("phone_cli.adb.companion.time.monotonic", side_effect=[20.0, 20.1]):
+            first_client = CompanionClient(host="127.0.0.1", port=17342)
+            second_client = CompanionClient(host="127.0.0.1", port=17343)
+            assert first_client.is_ready() is True
+            assert second_client.is_ready() is False
+        assert mock_status.call_count == 2
 
     def test_find_nodes_builds_correct_query(self):
         from phone_cli.adb.companion import CompanionClient
@@ -164,6 +200,7 @@ class TestCompanionClient:
             mock_post.assert_called_once_with(
                 "/actions/tap",
                 body={"x": 100, "y": 200},
+                timeout=8,
             )
 
     def test_swipe(self):
@@ -185,6 +222,7 @@ class TestCompanionClient:
                     "endY": 400,
                     "durationMs": 500,
                 },
+                timeout=3.5,
             )
 
     def test_get_screen_context(self):
@@ -713,6 +751,23 @@ class TestUiTreeRouting:
         assert parsed["data"]["source"] == "uiautomator"
         assert len(parsed["data"]["elements"]) == 1
         assert parsed["data"]["elements"][0]["text"] == "Hello"
+
+    def test_ui_tree_adb_returns_error_when_dump_fails(self):
+        daemon = MagicMock()
+        daemon._read_state.return_value = {"device_type": "adb"}
+
+        with patch("phone_cli.adb.companion.CompanionClient") as MockClient, \
+             patch("phone_cli.cli.commands.subprocess") as mock_subproc:
+            mock_instance = MockClient.return_value
+            mock_instance.is_ready.return_value = False
+            mock_subproc.run.return_value = MagicMock(returncode=1, stdout="", stderr="dump failed")
+
+            result = dispatch_command("ui_tree", {}, daemon)
+
+        parsed = json.loads(result)
+        assert parsed["status"] == "error"
+        assert parsed["error_code"] == "UI_TREE_UNAVAILABLE"
+        assert mock_subproc.run.call_count == 1
 
 
 # ── Type command companion integration test ──────────────────────────
