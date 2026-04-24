@@ -916,9 +916,21 @@ class TestCompanionManagerEnsureReady:
     def _healthy_status(self):
         return {
             "issues": [],
+            "issue_codes": [],
+            "accessibility_enabled": True,
             "accessibility_service_bound": True,
             "accessibility_service_crashed": False,
             "service_ready": True,
+        }
+
+    def _unbound_status(self):
+        return {
+            "issues": ["辅助服务未绑定到 AccessibilityManager"],
+            "issue_codes": ["SERVICE_NOT_BOUND"],
+            "accessibility_enabled": True,
+            "accessibility_service_bound": False,
+            "accessibility_service_crashed": False,
+            "service_ready": False,
         }
 
     def test_ensure_ready_full_happy_path(self):
@@ -967,6 +979,25 @@ class TestCompanionManagerEnsureReady:
             result = mgr.ensure_ready()
         mock_enable.assert_called_once()
         assert result["available"] is True
+
+    def test_ensure_ready_recovers_enabled_but_unbound_service(self):
+        mgr = self._make_manager()
+        with patch.object(mgr, "get_device_state", return_value="device"), \
+             patch.object(mgr, "is_installed", return_value=True), \
+             patch.object(mgr, "is_accessibility_enabled", return_value=True), \
+             patch.object(mgr, "get_status", side_effect=[
+                 self._unbound_status(),
+                 self._healthy_status(),
+             ]), \
+             patch.object(mgr, "is_port_forwarded", return_value=True), \
+             patch.object(mgr._client, "is_ready", side_effect=[False, True]), \
+             patch.object(mgr, "_run_adb") as mock_adb, \
+             patch("phone_cli.adb.companion_manager.time.sleep"):
+            result = mgr.ensure_ready()
+
+        assert result["available"] is True
+        assert any("binding_recovery" in step for step in result["steps"])
+        assert mock_adb.called
 
     def test_ensure_ready_accessibility_enable_failure_returns_error(self):
         mgr = self._make_manager()
@@ -1035,6 +1066,141 @@ class TestCompanionManagerEnsureReady:
         assert result["available"] is True
         # Should have launched MainActivity to wake up the service
         mock_adb.assert_called()
+
+
+class TestCompanionManagerStrictOem:
+    """OEM-aware binding recovery (Huawei/MIUI/ColorOS/Funtouch …)."""
+
+    def _make_manager(self, brand: str = ""):
+        from phone_cli.adb.companion_manager import CompanionManager
+        mgr = CompanionManager(device_id="test-strict")
+        mgr._cached_brand = brand.lower()
+        return mgr
+
+    def test_is_strict_oem_recognises_known_brands(self):
+        for brand in ("HUAWEI", "Honor", "Xiaomi", "REDMI", "OPPO", "OnePlus",
+                      "realme", "vivo", "iQOO", "MEIZU"):
+            mgr = self._make_manager(brand=brand)
+            assert mgr.is_strict_oem(), f"{brand} should be strict-OEM"
+
+    def test_is_strict_oem_returns_false_for_aosp_and_samsung(self):
+        for brand in ("samsung", "google", "asus", ""):
+            mgr = self._make_manager(brand=brand)
+            assert not mgr.is_strict_oem(), f"{brand} should not be strict"
+
+    def test_force_rebind_clears_then_restores_settings(self):
+        mgr = self._make_manager(brand="huawei")
+        with patch.object(mgr, "_run_adb") as mock_adb, \
+             patch("phone_cli.adb.companion_manager.time.sleep"):
+            result = mgr.force_rebind_accessibility()
+
+        assert "force_stop_companion" in result["actions"]
+        assert "clear_accessibility_settings" in result["actions"]
+        assert "restore_accessibility_settings" in result["actions"]
+
+        # Verify ordering: force-stop -> clear -> restore
+        run_calls = [call.args for call in mock_adb.call_args_list]
+        joined = ["|".join(str(arg) for arg in args) for args in run_calls]
+        assert any("force-stop" in s for s in joined)
+
+        empty_clear_idx = next(
+            i for i, s in enumerate(joined)
+            if "enabled_accessibility_services" in s and ('""' in s or "''" in s)
+        )
+        restore_idx = next(
+            i for i, s in enumerate(joined)
+            if "enabled_accessibility_services" in s
+            and "com.gamehelper.androidcontrol" in s
+        )
+        assert empty_clear_idx < restore_idx
+
+    def test_attempt_binding_recovery_strict_oem_skips_light_path(self):
+        """Strict OEMs should jump straight to force_rebind without trying am-start.
+
+        am-start is wasted work on these ROMs because AMS won't re-evaluate.
+        """
+        mgr = self._make_manager(brand="huawei")
+
+        with patch.object(mgr, "force_rebind_accessibility", return_value={"actions": ["x"]}) as mock_rebind, \
+             patch.object(mgr, "add_to_battery_whitelist", return_value=True) as mock_whitelist, \
+             patch.object(mgr, "_poll_ready", return_value=True), \
+             patch.object(mgr, "get_status", return_value={"accessibility_service_bound": True}), \
+             patch.object(mgr, "_run_adb") as mock_adb:
+            recovery = mgr._attempt_binding_recovery()
+
+        assert recovery["recovered"] is True
+        assert recovery["strict_oem"] is True
+        mock_rebind.assert_called_once()
+        mock_whitelist.assert_called_once()
+        # No am start launched on the light path for strict OEMs
+        assert all(
+            "am" not in call.args or "start" not in call.args
+            for call in mock_adb.call_args_list
+        )
+
+    def test_attempt_binding_recovery_non_strict_uses_light_path_first(self):
+        mgr = self._make_manager(brand="google")
+
+        with patch.object(mgr, "force_rebind_accessibility") as mock_rebind, \
+             patch.object(mgr, "_poll_ready", side_effect=[True]), \
+             patch.object(mgr, "_run_adb"):
+            recovery = mgr._attempt_binding_recovery()
+
+        assert recovery["recovered"] is True
+        mock_rebind.assert_not_called()  # light path succeeded
+
+    def test_attempt_binding_recovery_non_strict_falls_through_to_force_rebind(self):
+        mgr = self._make_manager(brand="google")
+
+        with patch.object(mgr, "force_rebind_accessibility", return_value={"actions": ["x"]}) as mock_rebind, \
+             patch.object(mgr, "_poll_ready", side_effect=[False, False, True]), \
+             patch.object(mgr, "get_status", return_value={"accessibility_service_bound": True}), \
+             patch.object(mgr, "_run_adb"):
+            recovery = mgr._attempt_binding_recovery()
+
+        assert recovery["recovered"] is True
+        mock_rebind.assert_called_once()  # light path failed, force_rebind was needed
+
+    def test_enable_accessibility_adds_battery_whitelist_on_strict_oem(self):
+        mgr = self._make_manager(brand="xiaomi")
+
+        with patch.object(mgr, "_run_adb", return_value=MagicMock(stdout="")) as _mock_adb, \
+             patch.object(mgr, "add_to_battery_whitelist", return_value=True) as mock_whitelist, \
+             patch.object(mgr, "get_status", return_value={
+                 "accessibility_enabled": True,
+                 "accessibility_service_bound": True,
+                 "issues": [],
+                 "issue_codes": [],
+             }), \
+             patch("phone_cli.adb.companion_manager.time.sleep"):
+            result = mgr.enable_accessibility()
+
+        assert result["enabled"] is True
+        mock_whitelist.assert_called_once()
+
+    def test_enable_accessibility_skips_battery_whitelist_on_aosp(self):
+        mgr = self._make_manager(brand="google")
+
+        with patch.object(mgr, "_run_adb", return_value=MagicMock(stdout="")), \
+             patch.object(mgr, "add_to_battery_whitelist", return_value=True) as mock_whitelist, \
+             patch.object(mgr, "get_status", return_value={
+                 "accessibility_enabled": True,
+                 "accessibility_service_bound": True,
+                 "issues": [],
+                 "issue_codes": [],
+             }), \
+             patch("phone_cli.adb.companion_manager.time.sleep"):
+            mgr.enable_accessibility()
+
+        mock_whitelist.assert_not_called()
+
+    def test_add_to_battery_whitelist_is_idempotent(self):
+        mgr = self._make_manager(brand="huawei")
+
+        with patch.object(mgr, "_run_adb") as mock_adb:
+            assert mgr.add_to_battery_whitelist() is True
+            assert mgr.add_to_battery_whitelist() is True  # second call no-op
+        assert mock_adb.call_count == 1
 
 
 # ── Normalize companion tree malformed input tests ───────────────────

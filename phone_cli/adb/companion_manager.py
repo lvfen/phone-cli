@@ -23,6 +23,18 @@ COMPANION_WS_PORT = 17343
 COMPANION_PROJECT_DIR = Path(__file__).resolve().parents[2] / "android-companion"
 APK_PATH = COMPANION_PROJECT_DIR / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
 
+# OEM ROMs that block ADB-driven a11y binding without "settings string change".
+# On these brands, simply toggling accessibility_enabled 0->1 does NOT trigger
+# AccessibilityManagerService to re-evaluate non-system-signed services.
+# A force-stop + clear-then-restore enabled_accessibility_services dance is needed.
+_STRICT_OEM_BRANDS = frozenset({
+    "huawei", "honor",
+    "xiaomi", "redmi", "poco",
+    "oppo", "oneplus", "realme",
+    "vivo", "iqoo",
+    "meizu",
+})
+
 
 class CompanionManager:
     """Full lifecycle manager for the Android Companion app.
@@ -33,6 +45,8 @@ class CompanionManager:
     def __init__(self, device_id: str | None = None):
         self._device_id = device_id
         self._client = CompanionClient()
+        self._cached_brand: str | None = None
+        self._battery_whitelist_attempted = False
 
     # ── ADB prefix helper ────────────────────────────────────────────
 
@@ -182,13 +196,200 @@ class CompanionManager:
             return "辅助服务已崩溃，请在手机上关闭后重新启用该无障碍服务，再重新执行 preflight。"
         if "启动异常" in first:
             return "辅助服务启动时发生异常，请查看 startup_error 并重新打开 Android 控制助手确认诊断信息。"
+        if "OEM 拒绝" in first or "OEM_ACCESSIBILITY_BIND_BLOCKED" in first:
+            return (
+                "已尝试自动重建辅助服务绑定但失败，多见于 OEM 限制（华为/EMUI、"
+                "MIUI、ColorOS、Funtouch 等）。请在手机上进入 "
+                "设置 > 辅助功能 > 已下载的服务 > Select to Speak，"
+                "手动关闭再开启该服务并允许「完全控制设备」，然后重试。"
+            )
         if "未绑定" in first:
-            return "服务设置已写入但系统没有真正绑定，请手动关闭再开启一次无障碍服务。"
+            return (
+                "服务设置已写入但系统没有真正绑定。"
+                "请先重新执行 `phone-cli companion-setup` 触发自动拉起；"
+                "若华为/EMUI 仍未恢复，请手动关闭再开启一次无障碍服务。"
+            )
         if "桥接" in first:
             return "运行 `phone-cli --instance adb companion-setup` 重新建立 ADB 端口转发。"
         if "未就绪" in first:
             return "打开手机上的 Android 控制助手页面，确认诊断页显示 service connected 后再重试。"
         return first
+
+    def _invalidate_ready_cache(self) -> None:
+        """Clear any cached readiness result before an active recovery attempt."""
+        self._client.__class__._ready_cache.pop(self._client._base_url, None)
+
+    def _is_recoverable_runtime_issue(self, issue_code: str) -> bool:
+        """Return whether ensure_ready can safely attempt process-level recovery."""
+        return issue_code in {
+            "SERVICE_NOT_BOUND",
+            "SERVICE_CRASHED",
+            "SERVICE_STARTUP_ERROR",
+            "HTTP_SERVER_DOWN",
+            "WEBSOCKET_SERVER_DOWN",
+        }
+
+    def _poll_ready(self, attempts: int = 5, delay_seconds: float = 1.0) -> bool:
+        """Poll companion readiness with cache invalidation between attempts."""
+        for attempt in range(attempts):
+            self._invalidate_ready_cache()
+            if self._client.is_ready():
+                return True
+            if attempt < attempts - 1:
+                time.sleep(delay_seconds)
+        return False
+
+    def get_device_brand(self) -> str:
+        """Return ro.product.brand lowercased; cached per manager instance."""
+        if self._cached_brand is None:
+            try:
+                result = self._run_adb(
+                    "shell", "getprop", "ro.product.brand", timeout=5,
+                )
+                self._cached_brand = (result.stdout or "").strip().lower()
+            except subprocess.SubprocessError:
+                self._cached_brand = ""
+        return self._cached_brand
+
+    def is_strict_oem(self) -> bool:
+        """Whether this device's OEM blocks ADB-driven a11y binding.
+
+        On these ROMs, AccessibilityManagerService only re-evaluates a service
+        when enabled_accessibility_services *string value* actually changes;
+        toggling accessibility_enabled alone is silently ignored. Recovery
+        therefore must clear-then-restore the enabled list.
+        """
+        return self.get_device_brand() in _STRICT_OEM_BRANDS
+
+    def add_to_battery_whitelist(self) -> bool:
+        """Add companion package to deviceidle battery whitelist.
+
+        On strict OEMs the system regularly trims background processes which
+        causes the bound accessibility service to be silently evicted hours
+        after a successful setup. The deviceidle whitelist drastically
+        reduces this. Idempotent and cached per manager instance.
+        """
+        if self._battery_whitelist_attempted:
+            return True
+        try:
+            self._run_adb(
+                "shell", "dumpsys", "deviceidle", "whitelist",
+                f"+{COMPANION_PACKAGE}",
+                timeout=5,
+            )
+            self._battery_whitelist_attempted = True
+            return True
+        except subprocess.SubprocessError:
+            return False
+
+    def force_rebind_accessibility(self) -> dict[str, Any]:
+        """Force AccessibilityManagerService to re-bind the companion service.
+
+        This is the strict-OEM rescue path. Sequence (proven on Huawei EMUI 10):
+
+        1. force-stop companion process so its next launch is fresh
+        2. clear enabled_accessibility_services AND set accessibility_enabled=0
+        3. wait for AMS to observe the change
+        4. write enabled_accessibility_services back AND set accessibility_enabled=1
+        5. wait for AMS to bind the service before the caller polls readiness
+
+        Step 2 (clearing the string) is the critical bit: without it, AMS
+        sees no value change and skips re-binding, which is exactly why a
+        plain accessibility_enabled toggle fails on strict OEMs.
+        """
+        actions: list[str] = []
+
+        self._run_adb(
+            "shell", "am", "force-stop", COMPANION_PACKAGE,
+            timeout=10,
+        )
+        actions.append("force_stop_companion")
+
+        self._run_adb(
+            "shell", "settings", "put", "secure",
+            "enabled_accessibility_services", '""',
+            timeout=5,
+        )
+        self._run_adb(
+            "shell", "settings", "put", "secure",
+            "accessibility_enabled", "0",
+            timeout=5,
+        )
+        actions.append("clear_accessibility_settings")
+        time.sleep(1.5)
+
+        self._run_adb(
+            "shell", "settings", "put", "secure",
+            "enabled_accessibility_services", COMPANION_SERVICE,
+            timeout=5,
+        )
+        self._run_adb(
+            "shell", "settings", "put", "secure",
+            "accessibility_enabled", "1",
+            timeout=5,
+        )
+        actions.append("restore_accessibility_settings")
+        time.sleep(3)
+
+        return {"actions": actions}
+
+    def _attempt_binding_recovery(self) -> dict[str, Any]:
+        """Try to recover an enabled-but-unbound accessibility service.
+
+        Two-stage strategy:
+
+        - Stage A (light): just launch MainActivity / force-stop+relaunch.
+          Works on stock Android and many non-strict OEMs. No side-effects on
+          secure settings.
+        - Stage B (heavy): force_rebind_accessibility() — touches secure
+          settings. Only attempted when stage A fails, OR when we already
+          know this is a strict OEM that ignores stage A.
+
+        Strict OEMs additionally get auto-added to the deviceidle whitelist
+        so the freshly-bound service isn't trimmed minutes later.
+        """
+        actions: list[str] = []
+        strict = self.is_strict_oem()
+        if strict:
+            actions.append("oem_strict_detected:" + (self.get_device_brand() or "?"))
+            self.add_to_battery_whitelist()
+            actions.append("battery_whitelist_added")
+
+        if not strict:
+            self._invalidate_ready_cache()
+            self._run_adb(
+                "shell", "am", "start", "-n", COMPANION_MAIN_ACTIVITY,
+                timeout=10,
+            )
+            actions.append("launch_main_activity")
+            if self._poll_ready():
+                return {"attempted": True, "actions": actions, "recovered": True}
+
+            self._run_adb(
+                "shell", "am", "force-stop", COMPANION_PACKAGE,
+                timeout=10,
+            )
+            actions.append("force_stop_companion")
+            self._invalidate_ready_cache()
+            self._run_adb(
+                "shell", "am", "start", "-n", COMPANION_MAIN_ACTIVITY,
+                timeout=10,
+            )
+            actions.append("relaunch_main_activity")
+            if self._poll_ready():
+                return {"attempted": True, "actions": actions, "recovered": True}
+
+        rebind = self.force_rebind_accessibility()
+        actions.extend(rebind["actions"])
+        self._invalidate_ready_cache()
+        recovered = self._poll_ready()
+        return {
+            "attempted": True,
+            "strict_oem": strict,
+            "actions": actions,
+            "recovered": recovered,
+            "status": self.get_status(),
+        }
 
     # ── Build ────────────────────────────────────────────────────────
 
@@ -325,6 +526,12 @@ class CompanionManager:
             "accessibility_enabled", "1",
         )
 
+        # On strict OEMs (Huawei/MIUI/OPPO/vivo) the freshly-bound service
+        # gets evicted within minutes by aggressive background management.
+        # Add to deviceidle whitelist proactively so the bind survives.
+        if self.is_strict_oem():
+            self.add_to_battery_whitelist()
+
         # Launch MainActivity to initialize the service
         self._run_adb(
             "shell", "am", "start", "-n", COMPANION_MAIN_ACTIVITY,
@@ -420,21 +627,30 @@ class CompanionManager:
             result["steps"].append({"accessibility": "already_enabled"})
 
         accessibility_status = self.get_status()
-        if accessibility_status.get("issues"):
-            blocking_issues = [
-                issue for issue in accessibility_status["issues"]
-                if "桥接" not in issue and "未就绪" not in issue
-            ]
-            if blocking_issues:
-                result["steps"].append({
-                    "accessibility_runtime": {
-                        "bound": accessibility_status.get("accessibility_service_bound"),
-                        "crashed": accessibility_status.get("accessibility_service_crashed"),
-                        "issues": blocking_issues,
-                    }
-                })
-                result["error"] = self._build_recommended_action(blocking_issues) or blocking_issues[0]
-                return result
+        issue_codes = accessibility_status.get("issue_codes", [])
+        blocking_issue_codes = [
+            code for code in issue_codes
+            if code not in {"PORT_FORWARD_MISSING", "HTTP_NOT_READY"}
+        ]
+        blocking_issues = [
+            issue for issue in accessibility_status.get("issues", [])
+            if "桥接" not in issue and "未就绪" not in issue
+        ]
+        should_attempt_binding_recovery = (
+            bool(blocking_issue_codes)
+            and all(self._is_recoverable_runtime_issue(code) for code in blocking_issue_codes)
+            and accessibility_status.get("accessibility_enabled")
+        )
+        if blocking_issues and not should_attempt_binding_recovery:
+            result["steps"].append({
+                "accessibility_runtime": {
+                    "bound": accessibility_status.get("accessibility_service_bound"),
+                    "crashed": accessibility_status.get("accessibility_service_crashed"),
+                    "issues": blocking_issues,
+                }
+            })
+            result["error"] = self._build_recommended_action(blocking_issues) or blocking_issues[0]
+            return result
 
         # Step 3: Port forwarding (must happen BEFORE readiness polling)
         if not self.is_port_forwarded():
@@ -454,23 +670,25 @@ class CompanionManager:
             result["steps"].append({"ready": True})
             return result
 
-        # Try launching MainActivity to wake up the service
-        self._run_adb(
-            "shell", "am", "start", "-n", COMPANION_MAIN_ACTIVITY,
-        )
-
-        for _ in range(5):
-            time.sleep(1)
-            if self._client.is_ready():
-                result["available"] = True
-                result["steps"].append({"ready": True})
-                return result
+        recovery_result = self._attempt_binding_recovery()
+        result["steps"].append({"binding_recovery": recovery_result})
+        if recovery_result.get("recovered"):
+            result["available"] = True
+            result["steps"].append({"ready": True})
+            return result
 
         status = self.get_status()
         result["steps"].append({"ready": {"ok": False, "issues": status.get("issues", [])}})
-        result["error"] = self._build_recommended_action(status.get("issues", [])) or (
-            "Companion service not ready after launch attempt"
-        )
+        # Strict OEM + still unbound after force_rebind = ROM-level block.
+        # Surface a precise hint instead of the generic "未绑定" message.
+        if recovery_result.get("strict_oem") and not status.get("accessibility_service_bound"):
+            result["error"] = self._build_recommended_action(
+                ["OEM 拒绝绑定辅助服务 (OEM_ACCESSIBILITY_BIND_BLOCKED)"]
+            )
+        else:
+            result["error"] = self._build_recommended_action(status.get("issues", [])) or (
+                "Companion service not ready after launch attempt"
+            )
         return result
 
     # ── Status query ─────────────────────────────────────────────────
